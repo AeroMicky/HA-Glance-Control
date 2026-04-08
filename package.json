@@ -1,0 +1,26 @@
+{
+  "name": "g2-home-assistant",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "sim": "evenhub-simulator http://localhost:5173",
+    "pack": "vite build && evenhub pack app.json dist -o g2-home-assistant.ehpk"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.9",
+    "@jappyjan/even-better-sdk": "^0.0.11"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-cli": "^0.1.11",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.7"
+  }
+}
