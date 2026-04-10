@@ -43,6 +43,8 @@ Your G2 glasses become a live window into your smart home. Sensor values scroll 
 ### Settings (Phone)
 
 ![Phone settings screen](images/Setup.png)
+![Favourites panel](images/favs.png)
+![Sensor customisation](images/sensors.png)
 
 - Full configuration from the Even Hub phone app
 - Search entities across all supported domains
