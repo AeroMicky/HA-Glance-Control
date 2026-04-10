@@ -1,4 +1,5 @@
 type HAStateChangedCallback = (entityId: string, state: string, attributes: Record<string, unknown>) => void
+type ConnectionCallback = (connected: boolean) => void
 
 interface HAEntity {
   entity_id: string
@@ -11,11 +12,15 @@ export class HAClient {
   private msgId = 1
   private pending = new Map<number, (result: unknown) => void>()
   private stateCallbacks: HAStateChangedCallback[] = []
+  private connectionCallbacks: ConnectionCallback[] = []
   private entities = new Map<string, HAEntity>()
   private entityAreas = new Map<string, string>()
   private areaNames = new Map<string, string>()
   private url: string
   private token: string
+  private deliberateDisconnect = false
+  private reconnectDelay = 1000
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(url: string, token: string) {
     this.url = url
@@ -49,8 +54,39 @@ export class HAClient {
       this.ws.onclose = (event) => {
         console.log('[HA] WebSocket closed:', event.code, event.reason)
         this.ws = null
+        if (!this.deliberateDisconnect) {
+          this.connectionCallbacks.forEach(cb => cb(false))
+          this.scheduleReconnect()
+        }
       }
     })
+  }
+
+  disconnect() {
+    this.deliberateDisconnect = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.ws?.close()
+  }
+
+  onConnectionChange(cb: ConnectionCallback) {
+    this.connectionCallbacks.push(cb)
+  }
+
+  private scheduleReconnect() {
+    if (this.deliberateDisconnect) return
+    console.log(`[HA] Reconnecting in ${this.reconnectDelay}ms...`)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000)
+      this.connect()
+        .then(() => {
+          this.reconnectDelay = 1000
+          this.connectionCallbacks.forEach(cb => cb(true))
+        })
+        .catch(() => this.scheduleReconnect())
+    }, this.reconnectDelay)
   }
 
   private handleMessage(msg: Record<string, unknown>, onReady: () => void, onFail: (err: Error) => void) {
@@ -118,20 +154,16 @@ export class HAClient {
   }
 
   private async fetchAreas() {
-    // Fetch area registry
     const areas = await this.sendCommand({ type: 'config/area_registry/list' }) as Array<{ area_id: string; name: string }>
     for (const area of areas) {
       this.areaNames.set(area.area_id, area.name)
     }
-    // Fetch entity registry to map entities to areas/devices
     const entities = await this.sendCommand({ type: 'config/entity_registry/list' }) as Array<{ entity_id: string; area_id?: string; device_id?: string }>
-    // Fetch device registry to get device->area mapping
     const devices = await this.sendCommand({ type: 'config/device_registry/list' }) as Array<{ id: string; area_id?: string }>
     const deviceAreaMap = new Map<string, string>()
     for (const dev of devices) {
       if (dev.area_id) deviceAreaMap.set(dev.id, dev.area_id)
     }
-    // Map each entity to its area (direct or via device)
     for (const ent of entities) {
       const areaId = ent.area_id || (ent.device_id ? deviceAreaMap.get(ent.device_id) : undefined)
       if (areaId) {
@@ -183,8 +215,37 @@ export class HAClient {
     }
   }
 
+  async callServiceWithData(
+    domain: string,
+    service: string,
+    entityId: string,
+    serviceData?: Record<string, unknown>
+  ): Promise<boolean> {
+    try {
+      await this.sendCommand({
+        type: 'call_service',
+        domain,
+        service,
+        service_data: { entity_id: entityId, ...serviceData },
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async toggle(entityId: string): Promise<boolean> {
     const domain = entityId.split('.')[0]
+    if (domain === 'cover') {
+      const entity = this.entities.get(entityId)
+      const service = entity?.state === 'open' ? 'close_cover' : 'open_cover'
+      return this.callService(domain, service, entityId)
+    }
+    if (domain === 'lock') {
+      const entity = this.entities.get(entityId)
+      const service = entity?.state === 'unlocked' ? 'lock' : 'unlock'
+      return this.callService(domain, service, entityId)
+    }
     return this.callService(domain, 'toggle', entityId)
   }
 }

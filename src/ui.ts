@@ -5,27 +5,30 @@ import {
   ListContainerProperty,
   ListItemContainerProperty,
   TextContainerProperty,
+  TextContainerUpgrade,
   OsEventTypeList,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
 import { HAClient } from './ha-client'
-import { FavoriteConfig, DashboardSlot } from './store'
+import { FavoriteConfig, SensorSlot, getConfig, saveConfig } from './store'
+import { buildSubItems, defaultServiceCall, SubItem, ServiceCall } from './submenus'
 
+// Layout constants — 576x288 4-bit greyscale display
 const W = 576
 const H = 288
-const LIST_W = 320
-const STATUS_W = 248
-const STATUS_X = 328
+const HEADER_H = 28
+const FOOTER_H = 36
+const BODY_TOP = HEADER_H + 4
+const BODY_H = H - HEADER_H - FOOTER_H - 12
+const LIST_W = 296
+const STATUS_X = LIST_W + 8
+const STATUS_W = W - STATUS_X
 
-type Screen =
-  | { type: 'menu' }
-  | { type: 'favorites' }
-  | { type: 'rooms' }
-  | { type: 'room'; name: string; entityIds: string[] }
-  | { type: 'confirm'; entityId: string; action: string }
-  | { type: 'result'; entityId: string; success: boolean }
-  | { type: 'dashboard' }
-  | { type: 'loading'; message: string }
+// Separators
+const DOT = '  /  '             // separator between sensor values
+const ARROW_R = '\u203A'        // › right arrow
+const BAR_FULL = '\u2501'       // ━ thick bar segment
+const BAR_EMPTY = '\u2500'      // ─ thin bar segment
 
 function resolveEventType(event: EvenHubEvent): OsEventTypeList | undefined {
   const raw =
@@ -46,42 +49,193 @@ function resolveEventType(event: EvenHubEvent): OsEventTypeList | undefined {
   return undefined
 }
 
+function domainIcon(domain: string, state: string): string {
+  const on = state === 'on' || state === 'open' || state === 'unlocked' || state === 'playing' || state === 'home'
+  if (domain === 'scene' || domain === 'script') return '\u25B6'
+  return on ? '\u25CF' : '\u25CB'
+}
+
 export class UI {
   private bridge: EvenAppBridge
   private ha: HAClient
-  private screen: Screen = { type: 'menu' }
+  private screenStack: Screen[] = [{ type: 'home' }]
   private startupRendered = false
+  private rendering = false
   private resultTimer: ReturnType<typeof setTimeout> | null = null
   private favorites: FavoriteConfig[] = []
-  private dashboard: DashboardSlot[] = []
+  private headerSensors: SensorSlot[] = []
+  private footerSensors: SensorSlot[] = []
   private rooms = new Map<string, string[]>()
+  private roomOrder: string[] = []
+  private sortedRoomNames: string[] = []
+  private roomListSortMode: 'custom' | 'recent' = 'custom'
+  private roomSortMode = new Map<string, 'custom' | 'recent'>()
+  private standbyMode = false
+  private stateDebounce: ReturnType<typeof setTimeout> | null = null
+  private footerPage = 0
+  private footerTimer: ReturnType<typeof setInterval> | null = null
+  private headerPage = 0
+  private headerTimer: ReturnType<typeof setInterval> | null = null
+  private headerScrollOffset = 0
+  private footerScrollOffset = 0
+  private scrollTimer: ReturnType<typeof setInterval> | null = null
+  private lastHeaderContent = ''
+  private lastFooterContent = ''
+  private statusPage = 0
+  private statusTimer: ReturnType<typeof setInterval> | null = null
+
+  private get screen(): Screen {
+    return this.screenStack[this.screenStack.length - 1]
+  }
+
+  private push(screen: Screen) {
+    this.screenStack.push(screen)
+  }
 
   constructor(ha: HAClient, bridge: EvenAppBridge) {
     this.ha = ha
     this.bridge = bridge
   }
 
-  configure(opts: { favorites: FavoriteConfig[]; dashboard: DashboardSlot[]; rooms: Record<string, string[]> }) {
+  configure(opts: {
+    favorites: FavoriteConfig[]
+    headerSensors: SensorSlot[]
+    footerSensors: SensorSlot[]
+    rooms: Record<string, string[]>
+    roomOrder?: string[]
+    roomListSortMode?: 'custom' | 'recent'
+    roomSortMode?: Record<string, 'custom' | 'recent'>
+  }) {
     this.favorites = opts.favorites
-    this.dashboard = opts.dashboard
+    this.headerSensors = opts.headerSensors
+    this.footerSensors = opts.footerSensors
     this.rooms.clear()
     for (const [name, ids] of Object.entries(opts.rooms)) {
       this.rooms.set(name, ids)
     }
+    this.roomOrder = opts.roomOrder ?? []
+    this.roomListSortMode = opts.roomListSortMode ?? 'custom'
+    this.roomSortMode.clear()
+    if (opts.roomSortMode) {
+      for (const [name, mode] of Object.entries(opts.roomSortMode)) {
+        this.roomSortMode.set(name, mode)
+      }
+    }
+    // Re-render to reflect config changes
+    if (this.startupRendered) {
+      this.footerPage = 0
+      this.headerPage = 0
+      this.headerScrollOffset = 0
+      this.footerScrollOffset = 0
+      this.lastHeaderContent = ''
+      this.lastFooterContent = ''
+      this.startPaginateTimers()
+      this.render().catch(console.error)
+    }
+  }
+
+  private startPaginateTimers() {
+    if (this.footerTimer) clearInterval(this.footerTimer)
+    if (this.headerTimer) clearInterval(this.headerTimer)
+    const ms = (getConfig().sensorPaginateInterval ?? 4) * 1000
+
+    this.footerTimer = setInterval(() => {
+      if (this.rendering) return
+      if (this.standbyMode) return
+      if (!this.isChromeScreen()) return
+      if (getConfig().sensorScrollMode === 'scroll') return
+      const pages = this.footerPages()
+      if (pages.length > 1) {
+        this.footerPage = (this.footerPage + 1) % pages.length
+        this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: 3,
+          containerName: 'footer',
+          content: this.footerContent(),
+        })).catch(console.error)
+      }
+    }, ms)
+
+    this.headerTimer = setInterval(() => {
+      if (this.rendering) return
+      if (getConfig().sensorScrollMode === 'scroll') return
+      const title = this.standbyMode
+        ? 'HA'
+        : this.isChromeScreen() ? (this.getHeaderTitle() ?? 'HA') : null
+      if (!title) return
+      const pages = this.headerSensorPages(title)
+      if (pages.length > 1) {
+        this.headerPage = (this.headerPage + 1) % pages.length
+        this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: 1,
+          containerName: 'header',
+          content: this.makeHeaderText(title).content,
+        })).catch(console.error)
+      }
+    }, ms)
   }
 
   async start() {
     this.bridge.onEvenHubEvent((event) => {
+      const sysType = event.sysEvent?.eventType
+      if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT || sysType === 4) {
+        this.render().catch(console.error)
+        return
+      }
       const eventType = resolveEventType(event)
       if (eventType === undefined) return
-      if (eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
-          eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) return
       const idx = event.listEvent?.currentSelectItemIndex ?? 0
-      this.handleEvent(eventType, idx)
+      this.handleEvent(eventType, idx).catch(err => {
+        console.error('[UI] Event handler error:', err)
+        this.render().catch(console.error)
+      })
     })
-    this.ha.onStateChanged(() => this.refreshIfNeeded())
+
+    this.ha.onStateChanged(() => {
+      if (this.stateDebounce) clearTimeout(this.stateDebounce)
+      this.stateDebounce = setTimeout(() => {
+        this.updateLivePanels().catch(console.error)
+      }, 500)
+    })
+
+    this.startPaginateTimers()
+
+    // Scroll ticker — runs every 500ms in scroll mode, skips if content unchanged
+    this.scrollTimer = setInterval(() => {
+      if (this.rendering) return
+      if (getConfig().sensorScrollMode !== 'scroll') return
+      this.headerScrollOffset++
+      this.footerScrollOffset++
+      const title = this.standbyMode
+        ? 'HA'
+        : this.isChromeScreen() ? (this.getHeaderTitle() ?? 'HA') : null
+      if (title) {
+        const headerContent = this.makeHeaderText(title).content
+        if (headerContent !== this.lastHeaderContent) {
+          this.lastHeaderContent = headerContent
+          this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+            containerID: 1,
+            containerName: 'header',
+            content: headerContent,
+          })).catch(console.error)
+        }
+      }
+      if (!this.standbyMode && this.isChromeScreen()) {
+        const footerContent = this.footerContent()
+        if (footerContent !== this.lastFooterContent) {
+          this.lastFooterContent = footerContent
+          this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+            containerID: 3,
+            containerName: 'footer',
+            content: footerContent,
+          })).catch(console.error)
+        }
+      }
+    }, 500)
+
     await this.render()
   }
+
+  // --- Container builders ---
 
   private async rebuildPage(config: {
     containerTotalNum: number
@@ -89,54 +243,134 @@ export class UI {
     textObject?: TextContainerProperty[]
   }) {
     if (!this.startupRendered) {
-      await this.bridge.createStartUpPageContainer(
-        new CreateStartUpPageContainer(config)
-      )
       this.startupRendered = true
+      await this.bridge.createStartUpPageContainer(new CreateStartUpPageContainer(config))
       return
     }
-    await this.bridge.rebuildPageContainer(
-      new RebuildPageContainer(config)
-    )
+    await this.bridge.rebuildPageContainer(new RebuildPageContainer(config))
   }
 
-  private makeList(items: string[]): ListContainerProperty {
-    return new ListContainerProperty({
+  private truncate(s: string, max: number): string {
+    return s.length <= max ? s : s.substring(0, max - 1) + '\u2026'
+  }
+
+  private makeHeaderText(title: string): TextContainerProperty {
+    const config = getConfig()
+    const clock = config.clock ?? { show: true, format: '24h' }
+    let content = ''
+    if (clock.show !== false) {
+      const now = new Date()
+      if (clock.format === '12h') {
+        const h = now.getHours() % 12 || 12
+        const ampm = now.getHours() < 12 ? 'AM' : 'PM'
+        content = `${h}:${String(now.getMinutes()).padStart(2, '0')}${ampm}`
+      } else {
+        content = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+      }
+      content += DOT
+    }
+    // Truncate title to 15 chars max
+    const truncTitle = title.length > 15 ? title.substring(0, 14) + '\u2026' : title
+    content += truncTitle
+
+    // Add header sensors — paginated or scrolling
+    if (getConfig().sensorScrollMode === 'scroll') {
+      const scrolled = this.headerScrollContent(title)
+      if (scrolled) content += DOT + scrolled
+    } else {
+      const pages = this.headerSensorPages(title)
+      if (pages.length > 0) {
+        this.headerPage = this.headerPage % pages.length
+        for (const part of pages[this.headerPage]) {
+          content += DOT + part
+        }
+      }
+    }
+
+    return new TextContainerProperty({
       containerID: 1,
-      containerName: 'list',
+      containerName: 'header',
+      content: content.substring(0, 68),
       xPosition: 0,
       yPosition: 0,
-      width: LIST_W,
-      height: H,
-      borderWidth: 1,
-      borderColor: 5,
-      borderRadius: 4,
-      paddingLength: 4,
-      isEventCapture: 1,
-      itemContainer: new ListItemContainerProperty({
-        itemCount: items.length,
-        itemWidth: LIST_W - 10,
-        isItemSelectBorderEn: 1,
-        itemName: items,
-      }),
-    })
-  }
-
-  private makeStatus(content: string): TextContainerProperty {
-    return new TextContainerProperty({
-      containerID: 2,
-      containerName: 'status',
-      content,
-      xPosition: STATUS_X,
-      yPosition: 0,
-      width: STATUS_W,
-      height: H,
+      width: W,
+      height: HEADER_H,
+      borderWidth: 0,
       paddingLength: 4,
       isEventCapture: 0,
     })
   }
 
-  private makeFullText(content: string): TextContainerProperty {
+  private makeFooterText(): TextContainerProperty {
+    return new TextContainerProperty({
+      containerID: 3,
+      containerName: 'footer',
+      content: this.footerContent(),
+      xPosition: 0,
+      yPosition: H - FOOTER_H,
+      width: W,
+      height: FOOTER_H,
+      borderWidth: 0,
+      paddingLength: 4,
+      isEventCapture: 0,
+    })
+  }
+
+  private makeList(items: string[]): ListContainerProperty {
+    const capped = items.slice(0, 20).map(s => this.truncate(s, 64))
+    return new ListContainerProperty({
+      containerID: 2,
+      containerName: 'list',
+      xPosition: 0,
+      yPosition: BODY_TOP,
+      width: LIST_W,
+      height: BODY_H,
+      borderWidth: 0,
+      borderRadius: 8,
+      paddingLength: 6,
+      isEventCapture: 1,
+      itemContainer: new ListItemContainerProperty({
+        itemCount: capped.length,
+        itemWidth: LIST_W - 14,
+        isItemSelectBorderEn: 1,
+        itemName: capped,
+      }),
+    })
+  }
+
+  private makeStatusBorder(): TextContainerProperty {
+    return new TextContainerProperty({
+      containerID: 4,
+      containerName: 'status_bg',
+      content: '',
+      xPosition: STATUS_X + 2,
+      yPosition: BODY_TOP,
+      width: STATUS_W - 4,
+      height: BODY_H,
+      borderWidth: 1,
+      borderColor: 8,
+      borderRadius: 8,
+      paddingLength: 0,
+      isEventCapture: 0,
+    })
+  }
+
+  private makeStatusText(content: string): TextContainerProperty {
+    return new TextContainerProperty({
+      containerID: 5,
+      containerName: 'status',
+      content,
+      xPosition: STATUS_X + 20,
+      yPosition: BODY_TOP + 4,
+      width: STATUS_W - 24,
+      height: BODY_H - 8,
+      borderWidth: 0,
+      paddingLength: 2,
+      isEventCapture: 0,
+    })
+  }
+
+  private makeFullScreen(content: string): TextContainerProperty {
     return new TextContainerProperty({
       containerID: 1,
       containerName: 'text',
@@ -145,267 +379,880 @@ export class UI {
       yPosition: 0,
       width: W,
       height: H,
-      paddingLength: 8,
+      borderWidth: 1,
+      borderColor: 5,
+      borderRadius: 4,
+      paddingLength: 12,
       isEventCapture: 1,
     })
   }
 
-  private entityLabel(entityId: string): string {
-    const entity = this.ha.getEntity(entityId)
-    const name = (entity?.attributes?.friendly_name as string) || entityId.split('.').pop() || entityId
-    const state = entity?.state ?? '?'
-    return `${name}  ${state.toUpperCase()}`
+  // --- Status panel content ---
+
+  private static readonly STATUS_LINES_PER_PAGE = 6
+  private static readonly STATUS_LINE_MAX = 20
+
+  private statusTrunc(s: string): string {
+    return s.length > UI.STATUS_LINE_MAX ? s.substring(0, UI.STATUS_LINE_MAX - 1) + '\u2026' : s
   }
 
-  async render() {
+  // icon · ratio(5) · · name — columns align regardless of x/x vs xx/xx
+  private statusCountLine(on: number, total: number, name: string): string {
+    const icon = on > 0 ? '\u2022' : ' '
+    const ratio = `${on}/${total}`.padStart(5)
+    const truncName = this.truncate(name, 13)
+    return `${icon} ${ratio}  ${truncName}`
+  }
+
+  private getStatusTitle(): string {
     switch (this.screen.type) {
-      case 'menu':
-        await this.renderMenu()
-        break
-      case 'favorites':
-        await this.renderFavorites()
-        break
-      case 'rooms':
-        await this.renderRooms()
-        break
-      case 'room':
-        await this.renderRoom()
-        break
-      case 'confirm':
-        await this.renderConfirm()
-        break
-      case 'result':
-        await this.renderResult()
-        break
-      case 'dashboard':
-        await this.renderDashboard()
-        break
-      case 'loading':
-        await this.renderLoading()
-        break
+      case 'home': return 'Overview'
+      case 'favorites': return `Favorites (${this.favorites.length})`
+      case 'rooms': return `Rooms (${this.rooms.size})`
+      case 'room': {
+        const c = this.countStates(this.screen.entityIds)
+        return `${this.screen.name} ${c.on}/${c.total}`
+      }
+      case 'submenu': return this.entityName(this.screen.entityId)
+      default: return ''
     }
   }
 
-  private async renderMenu() {
-    const items = ['Favorites', 'Rooms', 'Dashboard']
-    const status = [
-      'HA Glasses',
-      '',
-      `${this.favorites.length} favorites`,
-      `${this.rooms.size} rooms`,
-      `${this.dashboard.length} sensors`,
-    ].join('\n')
+  private getStatusLines(): string[] {
+    const offStates = new Set(['off', 'closed', 'locked', 'idle', 'standby', 'unavailable', 'unknown', 'disarmed', ''])
+    const isActive = (state: string) => !offStates.has(state)
+    const entityLine = (id: string) => {
+      const e = this.ha.getEntity(id)
+      const s = e?.state ?? '?'
+      return `${isActive(s) ? '\u2022' : '  '} ${this.statusTrunc(this.entityName(id))}`
+    }
+
+    switch (this.screen.type) {
+      case 'home': {
+        const allIds = new Set<string>()
+        for (const f of this.favorites) allIds.add(f.entity_id)
+        for (const ids of this.rooms.values()) ids.forEach(id => allIds.add(id))
+        const domainCounts: Record<string, { on: number; total: number }> = {}
+        for (const id of allIds) {
+          const domain = id.split('.')[0]
+          const state = this.ha.getEntity(id)?.state ?? 'unknown'
+          if (!domainCounts[domain]) domainCounts[domain] = { on: 0, total: 0 }
+          domainCounts[domain].total++
+          if (isActive(state)) domainCounts[domain].on++
+        }
+        const labels: Record<string, string> = { light: 'Lights', switch: 'Switches', fan: 'Fans', cover: 'Covers', lock: 'Locks', climate: 'Climate', scene: 'Scenes', script: 'Scripts', input_boolean: 'Inputs' }
+        return Object.entries(domainCounts)
+          .sort((a, b) => b[1].on - a[1].on || b[1].total - a[1].total)
+          .map(([d, c]) => this.statusCountLine(c.on, c.total, labels[d] || d))
+      }
+      case 'favorites':
+        return this.sortStatusEntities(this.favorites.map(f => f.entity_id)).map(id => entityLine(id))
+      case 'rooms': {
+        const mode = getConfig().statusPanelSort ?? 'status'
+        let roomEntries = this.getSortedRoomNames().map(name => {
+          const ids = this.rooms.get(name)!
+          const c = this.countStates(ids)
+          return { name, c }
+        })
+        if (mode === 'status') {
+          roomEntries = roomEntries.sort((a, b) => b.c.on - a.c.on || a.name.localeCompare(b.name))
+        } else if (mode === 'name') {
+          roomEntries = roomEntries.sort((a, b) => a.name.localeCompare(b.name))
+        }
+        return roomEntries.map(({ name, c }) => this.statusCountLine(c.on, c.total, name))
+      }
+      case 'room':
+        return this.sortStatusEntities(this.screen.entityIds).map(id => entityLine(id))
+      case 'submenu': {
+        const e = this.ha.getEntity(this.screen.entityId)
+        return [e?.state?.toUpperCase() ?? '?']
+      }
+      default:
+        return []
+    }
+  }
+
+  private formatStatusText(): string {
+    const title = this.getStatusTitle()
+    const lines = this.getStatusLines()
+    if (lines.length === 0) return title ? `${title}\nNo entities` : 'No entities'
+    const perPage = UI.STATUS_LINES_PER_PAGE
+    const totalPages = Math.ceil(lines.length / perPage)
+    if (this.statusPage >= totalPages) this.statusPage = 0
+    const start = this.statusPage * perPage
+    const page = lines.slice(start, start + perPage)
+    const pageIndicator = totalPages > 1 ? `  ${this.statusPage + 1}/${totalPages}` : ''
+    return `${title}${pageIndicator}\n${page.join('\n')}`
+  }
+
+  // --- Footer content ---
+
+  private sensorPart(slot: SensorSlot): string {
+    const raw = this.ha.getEntity(slot.entity_id)?.state ?? '?'
+    if (!this.meetsCondition(slot, raw)) return ''
+    const label = slot.label === '' ? '' : (getConfig().customNames[slot.entity_id] || slot.label)
+    const numRaw = Number(raw)
+    if (!isNaN(numRaw)) {
+      const scaled = slot.divisor ? numRaw / slot.divisor : numRaw
+      const formatted = Number.isInteger(scaled) ? `${scaled}` : `${Number(scaled.toFixed(1))}`
+      const unit = slot.unitOverride ?? slot.unit ?? ''
+      const valuePart = `${formatted}${unit ? ' ' + unit : ''}`
+      return label ? `${label} ${valuePart}` : valuePart
+    }
+    // Non-numeric state — unitOverride replaces the state text (e.g. "!" as a warning)
+    const display = slot.unitOverride ?? raw
+    return label ? `${label} ${display}` : display
+  }
+
+  private footerPages(): string[] {
+    if (this.footerSensors.length === 0) return ['']
+    const parts = this.footerSensors.map(s => this.sensorPart(s)).filter(Boolean)
+    const allJoined = parts.join(DOT)
+    if (allJoined.length <= 66) return [allJoined]
+
+    const maxLen = 58
+    const pages: string[] = []
+    let current = ''
+    for (const part of parts) {
+      const candidate = current ? `${current}${DOT}${part}` : part
+      if (candidate.length > maxLen && current) {
+        pages.push(current)
+        current = part
+      } else {
+        current = candidate
+      }
+    }
+    if (current) pages.push(current)
+    return pages.map((p, i) => `${i + 1}/${pages.length}${DOT}${p}`)
+  }
+
+  private footerContent(): string {
+    if (getConfig().sensorScrollMode === 'scroll') return this.footerScrollContent()
+    const pages = this.footerPages()
+    if (pages.length === 0) return ''
+    this.footerPage = this.footerPage % pages.length
+    return pages[this.footerPage]
+  }
+
+  private meetsCondition(slot: SensorSlot, rawState: string): boolean {
+    if (!slot.condition) return true
+    const { operator, value } = slot.condition
+    const numState = parseFloat(rawState)
+    const numValue = parseFloat(value)
+    if (!isNaN(numState) && !isNaN(numValue)) {
+      switch (operator) {
+        case '>':  return numState > numValue
+        case '<':  return numState < numValue
+        case '>=': return numState >= numValue
+        case '<=': return numState <= numValue
+        case '==': return numState === numValue
+        case '!=': return numState !== numValue
+      }
+    }
+    switch (operator) {
+      case '==': return rawState === value
+      case '!=': return rawState !== value
+      default:   return true
+    }
+  }
+
+  private headerSensorPart(slot: SensorSlot): string {
+    const entity = this.ha.getEntity(slot.entity_id)
+    if (!entity) return ''
+    if (!this.meetsCondition(slot, entity.state)) return ''
+    const label = slot.label === '' ? '' : (getConfig().customNames[slot.entity_id] || slot.label || '')
+    const rawState = entity.state
+    const numVal = parseFloat(rawState)
+    if (!isNaN(numVal) && rawState.trim() !== '') {
+      const scaled = slot.divisor ? numVal / slot.divisor : numVal
+      const unit = slot.unitOverride ?? (entity.attributes.unit_of_measurement as string) ?? ''
+      const formatted = Number.isInteger(scaled) ? `${scaled}` : `${Number(scaled.toFixed(1))}`
+      return label ? `${label} ${formatted}${unit}` : `${formatted}${unit}`
+    }
+    // Non-numeric state — unitOverride replaces the state text
+    const display = slot.unitOverride ?? rawState
+    return label ? `${label} ${display}` : display
+  }
+
+  private headerSensorPages(title: string): string[][] {
+    if (this.headerSensors.length === 0) return [[]]
+    const clockLen = getConfig().clock?.show !== false ? 5 + DOT.length : 0  // "HH:MM  /  "
+    const titleLen = Math.min(title.length, 15) + DOT.length
+    const budget = 68 - clockLen - titleLen
+    const parts = this.headerSensors.map(s => this.headerSensorPart(s)).filter(Boolean)
+    if (parts.join(DOT).length <= budget) return [parts]
+
+    const pages: string[][] = []
+    let current: string[] = []
+    for (const part of parts) {
+      const candidate = [...current, part]
+      if (candidate.join(DOT).length > budget && current.length > 0) {
+        pages.push(current)
+        current = [part]
+      } else {
+        current = candidate
+      }
+    }
+    if (current.length > 0) pages.push(current)
+    return pages
+  }
+
+  private headerScrollContent(title: string): string {
+    const clockLen = getConfig().clock?.show !== false ? 5 + DOT.length : 0
+    const titleLen = Math.min(title.length, 15) + DOT.length
+    const budget = 68 - clockLen - titleLen
+    const parts = this.headerSensors.map(s => this.headerSensorPart(s)).filter(Boolean)
+    if (parts.length === 0 || parts.join(DOT).length <= budget) return parts.join(DOT)
+    const loop = parts.join(DOT) + DOT + DOT
+    const offset = this.headerScrollOffset % loop.length
+    const shifted = loop.substring(offset) + loop
+    return shifted.substring(0, budget)
+  }
+
+  private footerScrollContent(): string {
+    if (this.footerSensors.length === 0) return ''
+    const parts = this.footerSensors.map(s => this.sensorPart(s)).filter(Boolean)
+    const joined = parts.join(DOT)
+    if (joined.length <= 66) return joined
+    const loop = joined + DOT + DOT
+    const offset = this.footerScrollOffset % loop.length
+    const shifted = loop.substring(offset) + loop
+    return shifted.substring(0, 66)
+  }
+
+  // --- Header title ---
+
+  private getHeaderTitle(): string | null {
+    switch (this.screen.type) {
+      case 'home':
+        return 'HA'
+      case 'favorites':
+        return 'Favorites'
+      case 'rooms':
+        return 'Rooms'
+      case 'room':
+        return this.screen.name
+      case 'submenu':
+        return this.entityName(this.screen.entityId)
+      default:
+        return null
+    }
+  }
+
+  // --- Live updates ---
+
+  private isChromeScreen(): boolean {
+    const t = this.screen.type
+    return t === 'home' || t === 'favorites' || t === 'rooms' || t === 'room' || t === 'submenu'
+  }
+
+  private async updateLivePanels() {
+    if (!this.startupRendered || this.rendering) return
+    if (this.standbyMode) {
+      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 1,
+        containerName: 'header',
+        content: this.makeHeaderText('HA').content,
+      }))
+      return
+    }
+    if (!this.isChromeScreen()) return
+    const screen = this.screen
+
+    // Update status text
+    await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+      containerID: 5,
+      containerName: 'status',
+      content: this.formatStatusText(),
+    }))
+
+    // Update header text
+    const headerTitle = this.getHeaderTitle()
+    if (headerTitle) {
+      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 1,
+        containerName: 'header',
+        content: this.makeHeaderText(headerTitle).content,
+      }))
+    }
+
+    // Update footer text
+    if (screen.type === 'home' || screen.type === 'favorites' || screen.type === 'rooms' || screen.type === 'room' || screen.type === 'submenu') {
+      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 3,
+        containerName: 'footer',
+        content: this.footerContent(),
+      }))
+    }
+  }
+
+  // --- Status rotation ---
+
+  private startStatusRotation() {
+    if (this.statusTimer) clearInterval(this.statusTimer)
+    const lines = this.getStatusLines()
+    const totalPages = Math.ceil(lines.length / UI.STATUS_LINES_PER_PAGE)
+    if (totalPages <= 1) return
+    this.statusTimer = setInterval(() => {
+      if (this.rendering || !this.isChromeScreen()) return
+      this.statusPage = (this.statusPage + 1) % totalPages
+      this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 5,
+        containerName: 'status',
+        content: this.formatStatusText(),
+      })).catch(console.error)
+    }, 4000)
+  }
+
+  private stopStatusRotation() {
+    if (this.statusTimer) {
+      clearInterval(this.statusTimer)
+      this.statusTimer = null
+    }
+    this.statusPage = 0
+  }
+
+  // --- Screen renderers ---
+
+  async render() {
+    this.rendering = true
+    try {
+      this.stopStatusRotation()
+      // Cancel pending state update to prevent it firing on non-chrome screens
+      if (this.stateDebounce) {
+        clearTimeout(this.stateDebounce)
+        this.stateDebounce = null
+      }
+      switch (this.screen.type) {
+        case 'home':     this.standbyMode ? await this.renderStandby() : await this.renderHome(); break
+        case 'favorites': await this.renderFavorites(); break
+        case 'rooms':    await this.renderRooms();    break
+        case 'room':     await this.renderRoom();     break
+        case 'submenu':  await this.renderSubmenu();  break
+        case 'confirm':  await this.renderConfirm();  break
+        case 'result':   await this.renderResult();   break
+        case 'loading':  await this.renderLoading();  break
+      }
+    } finally {
+      this.rendering = false
+    }
+  }
+
+  private async renderWithChrome(header: string, items: string[]) {
+    this.statusPage = 0
+    await this.rebuildPage({
+      containerTotalNum: 5,
+      listObject: [this.makeList(items)],
+      textObject: [
+        this.makeHeaderText(header),
+        this.makeFooterText(),
+        this.makeStatusBorder(),
+        this.makeStatusText(this.formatStatusText()),
+      ],
+    })
+    this.startStatusRotation()
+  }
+
+  private async renderStandby() {
     await this.rebuildPage({
       containerTotalNum: 2,
-      listObject: [this.makeList(items)],
-      textObject: [this.makeStatus(status)],
+      textObject: [
+        this.makeHeaderText('HA'),
+        new TextContainerProperty({
+          containerID: 2,
+          containerName: 'standby-capture',
+          content: '',
+          xPosition: 0,
+          yPosition: HEADER_H,
+          width: W,
+          height: H - HEADER_H,
+          borderWidth: 0,
+          paddingLength: 0,
+          isEventCapture: 1,
+        }),
+      ],
     })
+  }
+
+  private async renderHome() {
+    const recent = getConfig().recentlyUsed.slice(0, 18)
+    const favCount = this.favorites.length
+    const roomCount = this.rooms.size
+    const items = [`\u2605 Favorites (${favCount}) ${ARROW_R}`, `\u25A3 Rooms (${roomCount}) ${ARROW_R}`]
+    for (const id of recent) items.push(this.entityLabel(id))
+    await this.renderWithChrome('HA', items)
   }
 
   private async renderFavorites() {
-    const items = ['< Back', ...this.favorites.map(f => this.entityLabel(f.entity_id))]
-    const status = this.favorites.length > 0
-      ? `${this.favorites.length} favorites\n\nTap to toggle`
-      : 'No favorites\n\nAdd via phone'
-    await this.rebuildPage({
-      containerTotalNum: 2,
-      listObject: [this.makeList(items)],
-      textObject: [this.makeStatus(status)],
-    })
+    if (this.favorites.length === 0) {
+      await this.rebuildPage({
+        containerTotalNum: 1,
+        textObject: [this.makeFullScreen('\n\nNo favorites yet\n\nAdd entities using the\ncompanion app on your phone')],
+      })
+      return
+    }
+    const items = this.favorites.map(f => this.entityLabel(f.entity_id))
+    const counts = this.countStates(this.favorites.map(f => f.entity_id))
+    await this.renderWithChrome(`Favorites ${counts.on} on / ${counts.off} off`, items)
   }
 
   private async renderRooms() {
-    const roomNames = [...this.rooms.keys()]
-    const items = ['< Back', ...roomNames.map(name => {
+    const roomNames = this.getSortedRoomNames()
+    if (roomNames.length === 0) {
+      await this.rebuildPage({
+        containerTotalNum: 1,
+        textObject: [this.makeFullScreen('\n\nNo rooms configured\n\nConfigure rooms using the\ncompanion app on your phone')],
+      })
+      return
+    }
+    this.sortedRoomNames = roomNames
+    const items = roomNames.map(name => {
       const ids = this.rooms.get(name)!
-      return `${name}  (${ids.length})`
-    })]
-    const status = `${roomNames.length} rooms\n\nTap to browse`
-    await this.rebuildPage({
-      containerTotalNum: 2,
-      listObject: [this.makeList(items)],
-      textObject: [this.makeStatus(status)],
+      const c = this.countStates(ids)
+      return `${name}  ${c.on}/${c.total} ${ARROW_R}`
     })
+    await this.renderWithChrome(`Rooms (${this.rooms.size})`, items)
   }
 
   private async renderRoom() {
     if (this.screen.type !== 'room') return
-    const { name, entityIds } = this.screen
-    const items = ['< Back', ...entityIds.map(id => this.entityLabel(id))]
-    const status = `${name}\n\n${entityIds.length} entities`
-    await this.rebuildPage({
-      containerTotalNum: 2,
-      listObject: [this.makeList(items)],
-      textObject: [this.makeStatus(status)],
-    })
+    const { name } = this.screen
+    const canonical = this.rooms.get(name) ?? this.screen.entityIds
+    const entityIds = this.sortRoomEntities(name, canonical)
+    this.screen.entityIds = entityIds
+    const items = entityIds.map(id => this.entityLabel(id))
+    const c = this.countStates(entityIds)
+    await this.renderWithChrome(`${name} ${c.on}/${c.total}`, items)
+  }
+
+  private async renderSubmenu() {
+    if (this.screen.type !== 'submenu') return
+    const { entityId } = this.screen
+    const entity = this.ha.getEntity(entityId)
+    const state = entity?.state ?? '?'
+
+    const freshItems = buildSubItems(entityId, entity) ?? this.screen.items
+    this.screenStack[this.screenStack.length - 1] = { type: 'submenu', entityId, items: freshItems }
+
+    const listItems = freshItems.map(i => `${ARROW_R} ${i.label}`)
+    await this.renderWithChrome(`${this.entityName(entityId)} ${state.toUpperCase()}`, listItems)
+  }
+
+  // Shared centered box for confirm/result/loading screens
+  private static readonly ACTION_BOX_W = 280
+  private static readonly ACTION_BOX_X = (W - 280) / 2
+  private static readonly ACTION_BOX_H = 100
+
+  private isFavourite(entityId: string): boolean {
+    return getConfig().favorites.some(f => f.entity_id === entityId)
   }
 
   private async renderConfirm() {
     if (this.screen.type !== 'confirm') return
     const { entityId, action } = this.screen
-    const entity = this.ha.getEntity(entityId)
-    const name = (entity?.attributes?.friendly_name as string) || entityId
-    const text = `${action}\n${name}?\n\nTap = Yes\nDouble-tap = Cancel`
+    const name = this.truncate(this.entityName(entityId), 28)
+    const favLabel = this.isFavourite(entityId) ? '\u2606  Remove Favourite' : '\u2605  Add Favourite'
+
     await this.rebuildPage({
-      containerTotalNum: 1,
-      textObject: [this.makeFullText(text)],
+      containerTotalNum: 2,
+      listObject: [new ListContainerProperty({
+        containerID: 7,
+        containerName: 'confirm',
+        xPosition: UI.ACTION_BOX_X,
+        yPosition: 10,
+        width: UI.ACTION_BOX_W,
+        height: 124,
+        borderWidth: 0,
+        borderRadius: 4,
+        paddingLength: 8,
+        isEventCapture: 1,
+        itemContainer: new ListItemContainerProperty({
+          itemCount: 3,
+          itemWidth: UI.ACTION_BOX_W - 16,
+          isItemSelectBorderEn: 1,
+          itemName: [
+            '\u2717  Cancel',
+            `\u2713  ${action}`,
+            favLabel,
+          ],
+        }),
+      })],
+      textObject: [(() => {
+        const box = this.makeFullCentered(name, action, undefined, 185)
+        box.isEventCapture = 0
+        return box
+      })()],
+    })
+  }
+
+  private makeFullCentered(line1: string, line2: string, line3?: string, yPos?: number): TextContainerProperty {
+    return new TextContainerProperty({
+      containerID: 10,
+      containerName: 'action',
+      content: [line1, line2, line3].filter(Boolean).join('\n'),
+      xPosition: UI.ACTION_BOX_X,
+      yPosition: yPos ?? (H / 2 - 50),
+      width: UI.ACTION_BOX_W,
+      height: UI.ACTION_BOX_H,
+      borderWidth: 1,
+      borderColor: 8,
+      borderRadius: 12,
+      paddingLength: 8,
+      isEventCapture: 1,
     })
   }
 
   private async renderResult() {
     if (this.screen.type !== 'result') return
-    const { entityId, success } = this.screen
-    const entity = this.ha.getEntity(entityId)
-    const name = (entity?.attributes?.friendly_name as string) || entityId
-    const state = entity?.state ?? '?'
-    const text = success
-      ? `OK\n\n${name}\n${state.toUpperCase()}`
-      : `FAILED\n\n${name}`
-    await this.rebuildPage({
-      containerTotalNum: 1,
-      textObject: [this.makeFullText(text)],
-    })
-  }
+    const { entityId, success, action } = this.screen
+    const name = this.truncate(this.entityName(entityId), 26)
+    const truncAction = this.truncate(action, 26)
+    const icon = success ? '\u2713' : '\u2717'
 
-  private async renderDashboard() {
-    if (this.dashboard.length === 0) {
-      await this.rebuildPage({
-        containerTotalNum: 1,
-        textObject: [this.makeFullText('No sensors\n\nAdd via phone\n\nTap = Back')],
-      })
-      return
-    }
-    const lines = this.dashboard.map(slot => {
-      const entity = this.ha.getEntity(slot.entity_id)
-      const val = entity?.state ?? '?'
-      return `${slot.label}: ${val} ${slot.unit}`
-    })
-    const text = lines.join('\n') + '\n\nTap = Back'
     await this.rebuildPage({
       containerTotalNum: 1,
-      textObject: [this.makeFullText(text)],
+      textObject: [this.makeFullCentered(
+        `${icon} ${success ? 'Success' : 'Failed'}`,
+        name,
+        truncAction,
+      )],
     })
   }
 
   private async renderLoading() {
     if (this.screen.type !== 'loading') return
+    const lines = this.screen.message.split('\n')
     await this.rebuildPage({
       containerTotalNum: 1,
-      textObject: [this.makeFullText(this.screen.message)],
+      textObject: [this.makeFullCentered(
+        'Sending...',
+        this.truncate(lines[0] || '', 26),
+        lines[1] ? this.truncate(lines[1], 26) : undefined,
+      )],
     })
   }
 
-  private async handleEvent(eventType: OsEventTypeList, idx: number) {
+  // --- Event handling ---
+
+  private async handleEvent(eventType: OsEventTypeList, idx: number): Promise<void> {
+    if (eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
+        eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      return
+    }
     if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      if (this.screen.type === 'home') {
+        this.standbyMode = !this.standbyMode
+        await this.render()
+        return
+      }
       await this.goBack()
       return
     }
+    // In thin mode only double click is active
+    if (this.standbyMode) return
     if (eventType !== OsEventTypeList.CLICK_EVENT) return
 
     switch (this.screen.type) {
-      case 'menu':
-        await this.menuSelect(idx)
-        break
-      case 'favorites':
-        if (idx === 0) { await this.goBack(); return }
-        await this.favoriteSelect(idx - 1)
-        break
-      case 'rooms':
-        if (idx === 0) { await this.goBack(); return }
-        await this.roomSelect(idx - 1)
-        break
-      case 'room':
-        if (idx === 0) { await this.goBack(); return }
-        await this.roomEntitySelect(idx - 1)
-        break
-      case 'confirm':
-        await this.confirmExecute()
-        break
+      case 'home':      await this.homeSelect(idx);       break
+      case 'favorites': await this.favoriteSelect(idx);  break
+      case 'rooms':     await this.roomSelect(idx);      break
+      case 'room':      await this.roomEntitySelect(idx); break
+      case 'submenu':   await this.submenuSelect(idx);  break
+      case 'confirm':   await this.confirmSelect(idx);  break
       case 'result':
-      case 'dashboard':
-      case 'loading':
-        await this.goBack()
-        break
+      case 'loading':   await this.goBack();            break
     }
   }
 
-  private async menuSelect(idx: number) {
-    switch (idx) {
-      case 0: this.screen = { type: 'favorites' }; break
-      case 1: this.screen = { type: 'rooms' }; break
-      case 2: this.screen = { type: 'dashboard' }; break
-      default: return
+  private async entitySelect(entityId: string) {
+    const entity = this.ha.getEntity(entityId)
+    const domain = entityId.split('.')[0]
+    const subItems = buildSubItems(entityId, entity)
+
+    // Scenes and scripts run immediately — no confirm needed
+    if (domain === 'scene' || domain === 'script') {
+      const { action, serviceCall } = defaultServiceCall(entityId, entity?.state ?? 'unknown')
+      this.push({ type: 'loading', message: `${action}\n${this.entityName(entityId)}` })
+      await this.render()
+      const minWait = new Promise(r => setTimeout(r, 800))
+      const callResult = this.ha.callServiceWithData(serviceCall.domain, serviceCall.service, serviceCall.entityId, serviceCall.serviceData)
+      const [success] = await Promise.all([callResult, minWait])
+      this.screenStack.pop()
+      this.push({ type: 'result', entityId, success, action })
+      await this.render()
+      this.resultTimer = setTimeout(() => {
+        if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
+        this.postActionNavigate().catch(console.error)
+      }, 2000)
+      return
+    }
+
+    if (subItems !== null) {
+      this.push({ type: 'submenu', entityId, items: subItems })
+    } else {
+      const { action, serviceCall } = defaultServiceCall(entityId, entity?.state ?? 'unknown')
+      this.push({ type: 'confirm', entityId, action, serviceCall })
     }
     await this.render()
+  }
+
+  private async homeSelect(idx: number) {
+    if (idx === 0) { this.push({ type: 'favorites' }); await this.render() }
+    else if (idx === 1) { this.push({ type: 'rooms' }); await this.render() }
+    else {
+      const recent = getConfig().recentlyUsed
+      const recentIdx = idx - 2
+      if (recentIdx < recent.length) await this.entitySelect(recent[recentIdx])
+    }
   }
 
   private async favoriteSelect(idx: number) {
     if (idx >= this.favorites.length) return
-    const fav = this.favorites[idx]
-    const entity = this.ha.getEntity(fav.entity_id)
-    const currentState = entity?.state ?? 'unknown'
-    const action = currentState === 'on' ? 'Turn OFF' : 'Turn ON'
-    this.screen = { type: 'confirm', entityId: fav.entity_id, action }
-    await this.render()
+    await this.entitySelect(this.favorites[idx].entity_id)
   }
 
   private async roomSelect(idx: number) {
-    const roomNames = [...this.rooms.keys()]
+    const roomNames = this.sortedRoomNames
     if (idx >= roomNames.length) return
     const name = roomNames[idx]
-    this.screen = { type: 'room', name, entityIds: this.rooms.get(name)! }
+    this.addToRecentRooms(name)
+    this.push({ type: 'room', name, entityIds: this.rooms.get(name)! })
     await this.render()
   }
 
   private async roomEntitySelect(idx: number) {
     if (this.screen.type !== 'room') return
     if (idx >= this.screen.entityIds.length) return
-    const entityId = this.screen.entityIds[idx]
-    const entity = this.ha.getEntity(entityId)
-    const currentState = entity?.state ?? 'unknown'
-    const action = currentState === 'on' ? 'Turn OFF' : 'Turn ON'
-    this.screen = { type: 'confirm', entityId, action }
+    await this.entitySelect(this.screen.entityIds[idx])
+  }
+
+  private async submenuSelect(idx: number) {
+    if (this.screen.type !== 'submenu') return
+    const { items } = this.screen
+    if (idx >= items.length) return
+    const item = items[idx]
+    this.push({ type: 'confirm', entityId: item.serviceCall.entityId, action: item.label, serviceCall: item.serviceCall })
+    await this.render()
+  }
+
+  private async confirmSelect(idx: number) {
+    if (this.screen.type !== 'confirm') return
+    if (idx === 0) { await this.goBack(); return }
+    if (idx === 2) { await this.toggleFavourite(this.screen.entityId); return }
+    await this.confirmExecute()
+  }
+
+  private async toggleFavourite(entityId: string) {
+    const config = getConfig()
+    const isFav = this.isFavourite(entityId)
+    if (isFav) {
+      saveConfig({ favorites: config.favorites.filter(f => f.entity_id !== entityId) })
+    } else {
+      if (config.favorites.length < 8) {
+        saveConfig({ favorites: [...config.favorites, { entity_id: entityId, label: this.entityName(entityId) }] })
+      }
+    }
+    const action = isFav ? 'Removed from Favourites' : 'Added to Favourites'
+    this.screenStack.pop() // remove confirm
+    this.push({ type: 'result', entityId, success: true, action })
+    await this.render()
+    this.resultTimer = setTimeout(() => {
+      if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
+      this.postActionNavigate().catch(console.error)
+    }, 2000)
+  }
+
+  private async postActionNavigate() {
+    const dest = getConfig().postActionDestination ?? 'back'
+    if (dest === 'home') {
+      this.screenStack = [{ type: 'home' }]
+      this.standbyMode = false
+    } else if (dest === 'standby') {
+      this.screenStack = [{ type: 'home' }]
+      this.standbyMode = true
+    }
+    // 'back' — render whatever remains on the stack
     await this.render()
   }
 
   private async confirmExecute() {
     if (this.screen.type !== 'confirm') return
-    const { entityId } = this.screen
-    const entity = this.ha.getEntity(entityId)
-    const name = (entity?.attributes?.friendly_name as string) || entityId
-    this.screen = { type: 'loading', message: `Toggling ${name}...` }
+    const { entityId, action, serviceCall } = this.screen
+    const name = this.entityName(entityId)
+    this.push({ type: 'loading', message: `${action}\n${name}` })
     await this.render()
-    const success = await this.ha.toggle(entityId)
-    this.screen = { type: 'result', entityId, success }
+    // Ensure loading screen is visible for at least 800ms
+    const minWait = new Promise(r => setTimeout(r, 800))
+    const callResult = this.ha.callServiceWithData(
+      serviceCall.domain,
+      serviceCall.service,
+      serviceCall.entityId,
+      serviceCall.serviceData
+    )
+    const [success] = await Promise.all([callResult, minWait])
+    this.screenStack.pop() // remove loading
+    if (success) this.addToRecent(entityId)
+    this.push({ type: 'result', entityId, success, action })
     await this.render()
     this.resultTimer = setTimeout(() => {
-      this.screen = { type: 'favorites' }
-      this.render()
+      if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
+      if (this.screenStack[this.screenStack.length - 1]?.type === 'confirm') this.screenStack.pop()
+      this.postActionNavigate().catch(console.error)
     }, 2000)
   }
 
   private async goBack() {
     if (this.resultTimer) { clearTimeout(this.resultTimer); this.resultTimer = null }
-    switch (this.screen.type) {
-      case 'favorites':
-      case 'rooms':
-      case 'dashboard':
-        this.screen = { type: 'menu' }; break
-      case 'room':
-        this.screen = { type: 'rooms' }; break
-      case 'confirm':
-      case 'result':
-      case 'loading':
-        this.screen = { type: 'favorites' }; break
-      case 'menu':
-        return
-    }
+    if (this.screenStack.length > 1) this.screenStack.pop()
     await this.render()
   }
 
-  private refreshIfNeeded() {
-    if (this.screen.type === 'favorites' || this.screen.type === 'room' || this.screen.type === 'dashboard') {
-      this.render()
+  // --- Helpers ---
+
+  private entityName(entityId: string): string {
+    const custom = getConfig().customNames[entityId]
+    if (custom) return custom
+    const entity = this.ha.getEntity(entityId)
+    return (entity?.attributes?.friendly_name as string) || entityId.split('.').pop() || entityId
+  }
+
+  private entityLabel(entityId: string): string {
+    const entity = this.ha.getEntity(entityId)
+    const state = entity?.state ?? '?'
+    const domain = entityId.split('.')[0]
+    const icon = domainIcon(domain, state)
+    const name = this.entityName(entityId)
+    const attrs = entity?.attributes ?? {}
+
+    let detail = ''
+    if (domain === 'climate' && state !== 'off' && state !== 'unavailable') {
+      const tgt = attrs.temperature as number | undefined
+      const fan = attrs.fan_mode as string | undefined
+      const parts = [state.toUpperCase()]
+      if (tgt != null) parts.push(`${tgt}\u00B0`)
+      if (fan) parts.push(fan)
+      detail = parts.join(' ')
+    } else if (state === 'on' || state === 'open' || state === 'unlocked') {
+      if (domain === 'light' && attrs.brightness != null) {
+        const pct = Math.round((attrs.brightness as number) / 255 * 100)
+        detail = `${pct}%`
+      } else if (domain === 'cover' && attrs.current_position != null) {
+        detail = `${attrs.current_position}%`
+      } else if (domain === 'fan' && attrs.percentage != null) {
+        detail = `${attrs.percentage}%`
+      } else {
+        detail = state.toUpperCase()
+      }
+    }
+
+    return detail ? `${icon} ${name} ${ARROW_R} ${detail}` : `${icon} ${name}`
+  }
+
+  private countStates(entityIds: string[]): { on: number; off: number; total: number } {
+    const offStates = new Set(['off', 'closed', 'locked', 'idle', 'standby', 'unavailable', 'unknown', 'disarmed', ''])
+    let on = 0
+    for (const id of entityIds) {
+      const s = this.ha.getEntity(id)?.state ?? ''
+      if (!offStates.has(s)) on++
+    }
+    return { on, off: entityIds.length - on, total: entityIds.length }
+  }
+
+  private addToRecent(entityId: string) {
+    const config = getConfig()
+    const recent = [entityId, ...config.recentlyUsed.filter(id => id !== entityId)].slice(0, 8)
+    saveConfig({ recentlyUsed: recent })
+  }
+
+  private addToRecentRooms(roomName: string) {
+    const config = getConfig()
+    const recent = [roomName, ...(config.recentlyUsedRooms ?? []).filter(n => n !== roomName)].slice(0, 20)
+    saveConfig({ recentlyUsedRooms: recent })
+  }
+
+  private getSortedRoomNames(): string[] {
+    const allNames = [...this.rooms.keys()]
+    if (this.roomListSortMode === 'recent') {
+      const recent = getConfig().recentlyUsedRooms ?? []
+      if (recent.length === 0) return allNames
+      return [...allNames].sort((a, b) => {
+        const ai = recent.indexOf(a), bi = recent.indexOf(b)
+        if (ai === -1 && bi === -1) return a.localeCompare(b)
+        if (ai === -1) return 1
+        if (bi === -1) return -1
+        return ai - bi
+      })
+    }
+    if (this.roomOrder.length === 0) return allNames
+    return [...allNames].sort((a, b) => {
+      const ai = this.roomOrder.indexOf(a), bi = this.roomOrder.indexOf(b)
+      if (ai === -1 && bi === -1) return 0
+      if (ai === -1) return 1
+      if (bi === -1) return -1
+      return ai - bi
+    })
+  }
+
+  private sortRoomEntities(roomName: string, entityIds: string[]): string[] {
+    const roomMode = this.roomSortMode.get(roomName) ?? 'custom'
+    if (roomMode === 'recent') {
+      const recent = getConfig().recentlyUsed
+      if (recent.length === 0) return entityIds
+      return [...entityIds].sort((a, b) => {
+        const ai = recent.indexOf(a), bi = recent.indexOf(b)
+        if (ai === -1 && bi === -1) return this.entityName(a).localeCompare(this.entityName(b))
+        if (ai === -1) return 1
+        if (bi === -1) return -1
+        return ai - bi
+      })
+    }
+    // 'custom' — defer to statusPanelSort for ordering
+    return this.sortStatusEntities(entityIds)
+  }
+
+  private sortStatusEntities(entityIds: string[]): string[] {
+    const mode = getConfig().statusPanelSort ?? 'status'
+    switch (mode) {
+      case 'status': {
+        const offStates = new Set(['off', 'closed', 'locked', 'idle', 'standby', 'unavailable', 'unknown', 'disarmed', ''])
+        const isActive = (state: string) => !offStates.has(state)
+        return [...entityIds].sort((a, b) => {
+          const sa = this.ha.getEntity(a)?.state ?? ''
+          const sb = this.ha.getEntity(b)?.state ?? ''
+          const aOn = isActive(sa) ? 0 : 1
+          const bOn = isActive(sb) ? 0 : 1
+          if (aOn !== bOn) return aOn - bOn
+          return this.entityName(a).localeCompare(this.entityName(b))
+        })
+      }
+      case 'name':
+        return [...entityIds].sort((a, b) =>
+          this.entityName(a).localeCompare(this.entityName(b))
+        )
+      case 'recent': {
+        const recent = getConfig().recentlyUsed
+        if (recent.length === 0) return entityIds
+        return [...entityIds].sort((a, b) => {
+          const ai = recent.indexOf(a), bi = recent.indexOf(b)
+          if (ai === -1 && bi === -1) return this.entityName(a).localeCompare(this.entityName(b))
+          if (ai === -1) return 1
+          if (bi === -1) return -1
+          return ai - bi
+        })
+      }
+      case 'custom':
+      default:
+        return entityIds
     }
   }
 }
+
+type Screen =
+  | { type: 'home' }
+  | { type: 'favorites' }
+  | { type: 'rooms' }
+  | { type: 'room'; name: string; entityIds: string[] }
+  | { type: 'submenu'; entityId: string; items: SubItem[] }
+  | { type: 'confirm'; entityId: string; action: string; serviceCall: ServiceCall }
+  | { type: 'result'; entityId: string; success: boolean; action: string }
+  | { type: 'loading'; message: string }

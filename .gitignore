@@ -1,1 +1,10 @@
-node_modules\ndist\n*.ehpk\n.env
+node_modules
+dist
+*.ehpk
+.env
+
+# Simulator raw screenshots (use `npm run screenshot <name>` to save properly)
+glasses_*.png
+app_*.png
+screenshot.png
+*.mov

@@ -7,15 +7,17 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "sim": "evenhub-simulator http://localhost:5173",
-    "pack": "vite build && evenhub pack app.json dist -o g2-home-assistant.ehpk"
+    "sim": "cd screenshots && evenhub-simulator http://localhost:5173",
+    "pack": "vite build && evenhub pack app.json dist -o g2-home-assistant.ehpk",
+    "screenshot": "node screenshot.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.9",
-    "@jappyjan/even-better-sdk": "^0.0.11"
+    "@jappyjan/even-better-sdk": "^0.0.11",
+    "@playwright/test": "^1.59.1"
   },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.11",

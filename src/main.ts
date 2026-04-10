@@ -1,8 +1,8 @@
-import { waitForEvenAppBridge, EvenAppBridge } from '@evenrealities/even_hub_sdk'
+import { waitForEvenAppBridge, EvenAppBridge, DeviceConnectType } from '@evenrealities/even_hub_sdk'
 import { HAClient } from './ha-client'
 import { UI } from './ui'
 import { PhoneUI } from './phone-ui'
-import { loadConfig, onConfigChanged } from './store'
+import { loadConfig, getConfig, onConfigChanged } from './store'
 import './style.css'
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -21,7 +21,6 @@ async function main() {
   root.id = 'phone-root'
   document.body.appendChild(root)
 
-  // Initialize bridge first so storage is available
   try {
     bridge = await withTimeout(waitForEvenAppBridge(), 3000)
     console.log('[Main] Bridge ready')
@@ -30,8 +29,9 @@ async function main() {
   }
 
   let glassesUI: UI | null = null
+  let activeHA: HAClient | null = null
 
-  function tryConnectGlasses(ha: HAClient) {
+  async function tryConnectGlasses(ha: HAClient) {
     if (!bridge) return
     glassesUI = new UI(ha, bridge)
     applyConfig(glassesUI)
@@ -39,6 +39,7 @@ async function main() {
   }
 
   const phoneUI = new PhoneUI(root, (ha: HAClient) => {
+    activeHA = ha
     tryConnectGlasses(ha)
   })
 
@@ -48,13 +49,31 @@ async function main() {
     try {
       const ha = new HAClient(config.ha_url, config.ha_token)
       await ha.connect()
+      activeHA = ha
       phoneUI.setHA(ha)
       tryConnectGlasses(ha)
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      phoneUI.setConnectError(msg)
       phoneUI.render()
     }
   } else {
     phoneUI.render()
+  }
+
+  // Re-render glasses when device reconnects
+  if (bridge) {
+    bridge.onDeviceStatusChanged((status) => {
+      console.log('[Main] Device status:', status.connectType)
+      if (status.connectType === DeviceConnectType.Connected && glassesUI) {
+        glassesUI.render()
+      }
+    })
+
+    // Log launch source — glassesMenu = launched via ring
+    bridge.onLaunchSource((source) => {
+      console.log('[Main] Launch source:', source)
+    })
   }
 
   onConfigChanged(() => {
@@ -62,12 +81,16 @@ async function main() {
   })
 }
 
-async function applyConfig(ui: UI) {
-  const config = await loadConfig()
+function applyConfig(ui: UI) {
+  const config = getConfig()
   ui.configure({
     favorites: config.favorites,
-    dashboard: config.dashboard,
+    headerSensors: config.headerSensors,
+    footerSensors: config.footerSensors,
     rooms: config.rooms,
+    roomOrder: config.roomOrder,
+    roomListSortMode: config.roomListSortMode,
+    roomSortMode: config.roomSortMode,
   })
 }
 
