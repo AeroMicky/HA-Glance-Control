@@ -11,6 +11,13 @@ Monitor your home at a glance and control lights, switches, covers, locks, and c
 </p>
 <p align="center">
   <img src="images/standby.png" width="60%"/>
+  <br/>
+  <em>Standby mode — clock and live sensors always visible</em>
+</p>
+<p align="center">
+  <img src="images/image3.png" width="80%"/>
+  <br/>
+  <em>Standby mode keeps your home data in view without interrupting your day</em>
 </p>
 
 ---
