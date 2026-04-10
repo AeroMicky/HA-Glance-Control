@@ -9,6 +9,9 @@ Monitor your home at a glance and control lights, switches, covers, locks, and c
   &nbsp;
   <img src="images/image2.png" width="45%"/>
 </p>
+<p align="center">
+  <img src="images/standby.png" width="60%"/>
+</p>
 
 ---
 
