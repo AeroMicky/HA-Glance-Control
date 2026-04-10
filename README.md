@@ -4,7 +4,8 @@
 
 Monitor your home at a glance and control lights, switches, covers, locks, and climate — without touching your phone.
 
-![HA Glance & Control on G2 glasses](images/image.png)
+![Sensor panel on G2 glasses](images/image.png)
+![Entity control on G2 glasses](images/image2.png)
 
 ---
 
@@ -40,6 +41,9 @@ Your G2 glasses become a live window into your smart home. Sensor values scroll 
 - Ring controller still responds — tap to wake into the full interface
 
 ### Settings (Phone)
+
+![Phone settings screen](images/Setup.png)
+
 - Full configuration from the Even Hub phone app
 - Search entities across all supported domains
 - Drag to reorder sensors, rooms, and favourites
