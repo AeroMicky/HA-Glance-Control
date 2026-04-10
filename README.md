@@ -4,8 +4,11 @@
 
 Monitor your home at a glance and control lights, switches, covers, locks, and climate — without touching your phone.
 
-![Sensor panel on G2 glasses](images/image.png)
-![Entity control on G2 glasses](images/image2.png)
+<p align="center">
+  <img src="images/image.png" width="45%"/>
+  &nbsp;
+  <img src="images/image2.png" width="45%"/>
+</p>
 
 ---
 
@@ -42,9 +45,13 @@ Your G2 glasses become a live window into your smart home. Sensor values scroll 
 
 ### Settings (Phone)
 
-![Phone settings screen](images/Setup.png)
-![Favourites panel](images/favs.png)
-![Sensor customisation](images/sensors.png)
+<p align="center">
+  <img src="images/Setup.png" width="30%"/>
+  &nbsp;
+  <img src="images/favs.png" width="30%"/>
+  &nbsp;
+  <img src="images/sensors.png" width="30%"/>
+</p>
 
 - Full configuration from the Even Hub phone app
 - Search entities across all supported domains
