@@ -978,6 +978,7 @@ export class UI {
       const callResult = this.ha.callServiceWithData(serviceCall.domain, serviceCall.service, serviceCall.entityId, serviceCall.serviceData)
       const [success] = await Promise.all([callResult, minWait])
       this.screenStack.pop()
+      if (success) this.addToRecent(entityId)
       this.push({ type: 'result', entityId, success, action })
       await this.render()
       this.resultTimer = setTimeout(() => {

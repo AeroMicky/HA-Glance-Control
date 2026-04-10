@@ -268,23 +268,7 @@ export class PhoneUI {
     el.querySelector('#export-config')?.addEventListener('click', () => {
       const { ha_url, ha_token, ...cfg } = getConfig()
       const json = JSON.stringify(cfg, null, 2)
-      const isAndroid = /android/i.test(navigator.userAgent)
-
-      if (isAndroid) {
-        // Android webview supports downloads reliably
-        const blob = new Blob([json], { type: 'application/json' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = 'g2-ha-config.json'
-        document.body.appendChild(a)
-        a.click()
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-      } else {
-        // Simulator / iOS — show copy modal
-        this.showExportModal(json)
-      }
+      this.showExportModal(json)
     })
 
     el.querySelector('#import-config-row')?.addEventListener('click', () => {
