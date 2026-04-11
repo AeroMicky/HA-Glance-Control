@@ -42,6 +42,7 @@ export interface EnergyMonitor {
 export interface ClockConfig {
   show: boolean
   format: '12h' | '24h'
+  showDate?: boolean
 }
 
 export interface AppConfig {
@@ -63,6 +64,7 @@ export interface AppConfig {
   recentlyUsedRooms: string[]
   customNames: Record<string, string>
   customIcons: Record<string, string>
+  enabledTodoLists: string[]  // entity_ids of enabled todo lists
   // Legacy — kept for migration
   dashboard?: DashboardSlot[]
   energySlots?: EnergySlot[]
@@ -90,6 +92,7 @@ const DEFAULT_CONFIG: AppConfig = {
   recentlyUsedRooms: [],
   customNames: {},
   customIcons: {},
+  enabledTodoLists: [],
 }
 
 type ConfigListener = (config: AppConfig) => void

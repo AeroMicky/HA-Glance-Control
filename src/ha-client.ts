@@ -7,6 +7,14 @@ interface HAEntity {
   attributes: Record<string, unknown>
 }
 
+export interface TodoItem {
+  uid: string
+  summary: string
+  description?: string
+  due?: string
+  done: boolean // true if status === 'completed'
+}
+
 export class HAClient {
   private ws: WebSocket | null = null
   private msgId = 1
@@ -109,10 +117,12 @@ export class HAClient {
 
       case 'result': {
         const id = msg.id as number
+        const success = msg.success as boolean
+        console.log(`[HA] Result id=${id} success=${success}`)
         const cb = this.pending.get(id)
         if (cb) {
           this.pending.delete(id)
-          cb(msg.result)
+          cb(success ? msg.result : null)
         }
         break
       }
@@ -247,5 +257,94 @@ export class HAClient {
       return this.callService(domain, service, entityId)
     }
     return this.callService(domain, 'toggle', entityId)
+  }
+
+  getTodoEntities(): HAEntity[] {
+    return this.getEntitiesByDomain('todo')
+  }
+
+  private get httpUrl(): string {
+    return this.url.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/api\/websocket$/, '')
+  }
+
+  async getTodoItems(entityId: string): Promise<TodoItem[]> {
+    // Use REST API — more reliable than WebSocket call_service in WebView
+    try {
+      console.log(`[HA] getTodoItems REST for ${entityId}`)
+      const resp = await fetch(`${this.httpUrl}/api/services/todo/get_items`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ entity_id: entityId }),
+      })
+      if (!resp.ok) {
+        console.error(`[HA] REST todo/get_items failed: ${resp.status}`)
+        return this.getTodoItemsWS(entityId)
+      }
+      const data = await resp.json()
+      console.log(`[HA] REST response:`, JSON.stringify(data).substring(0, 200))
+
+      // REST response: { "todo.entity_id": { "items": [...] } }
+      let entityObj = data[entityId] as Record<string, unknown> | undefined
+      if (!entityObj) {
+        const keys = Object.keys(data)
+        if (keys.length > 0) entityObj = data[keys[0]] as Record<string, unknown>
+      }
+      const itemsArray = entityObj?.['items'] as Array<Record<string, unknown>> | undefined
+      if (!Array.isArray(itemsArray)) return []
+
+      return itemsArray.map(item => ({
+        uid: (item['uid'] || item['id']) as string,
+        summary: item['summary'] as string,
+        description: item['description'] as string | undefined,
+        due: item['due'] as string | undefined,
+        done: item['status'] === 'completed',
+      }))
+    } catch (err) {
+      console.error(`[HA] REST getTodoItems failed:`, err)
+      return this.getTodoItemsWS(entityId)
+    }
+  }
+
+  private async getTodoItemsWS(entityId: string): Promise<TodoItem[]> {
+    try {
+      const response = await this.sendCommand({
+        type: 'call_service',
+        domain: 'todo',
+        service: 'get_items',
+        service_data: { entity_id: entityId },
+        return_response: true,
+      })
+      if (!response) return []
+      const res = response as Record<string, unknown>
+      const responseObj = res['response'] as Record<string, unknown> | undefined
+      if (!responseObj) return []
+      let entityObj = responseObj[entityId] as Record<string, unknown> | undefined
+      if (!entityObj) {
+        const keys = Object.keys(responseObj)
+        if (keys.length > 0) entityObj = responseObj[keys[0]] as Record<string, unknown>
+      }
+      const itemsArray = entityObj?.['items'] as Array<Record<string, unknown>> | undefined
+      if (!Array.isArray(itemsArray)) return []
+      return itemsArray.map(item => ({
+        uid: (item['uid'] || item['id']) as string,
+        summary: item['summary'] as string,
+        description: item['description'] as string | undefined,
+        due: item['due'] as string | undefined,
+        done: item['status'] === 'completed',
+      }))
+    } catch (err) {
+      console.error(`[HA] WS getTodoItems failed:`, err)
+      return []
+    }
+  }
+
+  async updateTodoItem(entityId: string, uid: string, done: boolean): Promise<boolean> {
+    return this.callServiceWithData('todo', 'update_item', entityId, {
+      item: uid,
+      status: done ? 'completed' : 'needs_action',
+    })
   }
 }

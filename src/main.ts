@@ -91,6 +91,7 @@ function applyConfig(ui: UI) {
     roomOrder: config.roomOrder,
     roomListSortMode: config.roomListSortMode,
     roomSortMode: config.roomSortMode,
+    enabledTodoLists: config.enabledTodoLists,
   })
 }
 

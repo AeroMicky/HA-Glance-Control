@@ -25,7 +25,7 @@ const DOMAIN_ICONS: Record<string, string> = {
   lock: '\u{1F512}',
 }
 
-type Tab = 'connection' | 'favorites' | 'rooms' | 'sensors'
+type Tab = 'connection' | 'favorites' | 'rooms' | 'sensors' | 'todoLists'
 
 export class PhoneUI {
   private ha: HAClient | null = null
@@ -61,6 +61,7 @@ export class PhoneUI {
           ${this.tabBtn('favorites', 'Favs')}
           ${this.tabBtn('rooms', 'Rooms')}
           ${this.tabBtn('sensors', 'Sensors')}
+          ${this.tabBtn('todoLists', 'Lists')}
         </nav>
         <main id="tab-content"></main>
       </div>
@@ -79,6 +80,7 @@ export class PhoneUI {
       case 'favorites': this.renderFavorites(content, config); break
       case 'rooms': this.renderRooms(content, config); break
       case 'sensors': this.renderSensors(content, config); break
+      case 'todoLists': this.renderTodoListsConfig(content, config); break
     }
   }
 
@@ -118,6 +120,10 @@ export class PhoneUI {
           <div class="entity-row" id="clock-format">
             <div class="row-text"><span class="name">Format: ${config.clock?.format === '12h' ? '12-hour' : '24-hour'}</span></div>
             <div class="row-right"><span class="chevron">&#x203A;</span></div>
+          </div>
+          <div class="entity-row" id="clock-date">
+            <div class="row-text"><span class="name">Show Date</span></div>
+            <div class="row-right"><span class="checkbox ${config.clock?.showDate ? 'checked' : ''}">&#10003;</span></div>
           </div>
         </div>
 
@@ -245,6 +251,13 @@ export class PhoneUI {
     el.querySelector('#clock-format')?.addEventListener('click', () => {
       const clock = { ...(getConfig().clock ?? { show: true, format: '24h' as const }) }
       clock.format = clock.format === '24h' ? '12h' : '24h'
+      saveConfig({ clock })
+      this.render()
+    })
+
+    el.querySelector('#clock-date')?.addEventListener('click', () => {
+      const clock = { ...(getConfig().clock ?? { show: true, format: '24h' as const }) }
+      clock.showDate = !clock.showDate
       saveConfig({ clock })
       this.render()
     })
@@ -1434,6 +1447,69 @@ export class PhoneUI {
     const dark = !this.isDarkMode()
     localStorage.setItem('ha-dark-mode', dark ? 'true' : 'false')
     this.applyTheme()
+  }
+
+  private renderTodoListsConfig(el: HTMLElement, config: AppConfig) {
+    if (!this.ha) {
+      el.innerHTML = '<div class="empty-state"><p class="empty-title">Not connected</p><p class="empty-desc">Connect to HA first</p></div>'
+      return
+    }
+
+    const todoEntities = this.ha.getTodoEntities()
+    const enabled = config.enabledTodoLists ?? []
+
+    el.innerHTML = `
+      <p class="section-header">Lists (${todoEntities.length})</p>
+      <p class="hint" style="margin-top:0">Select which lists appear on the glasses.</p>
+      <div class="card">
+        <div class="entity-list">
+          ${todoEntities.map(e => {
+            const isEnabled = enabled.includes(e.entity_id)
+            const itemCount = parseInt(e.state) || 0
+            const friendlyName = (e.attributes?.friendly_name as string) || e.entity_id.split('.').pop() || e.entity_id
+            return `
+            <div class="entity-row" data-id="${e.entity_id}" style="cursor:pointer;user-select:none">
+              <input type="checkbox" ${isEnabled ? 'checked' : ''} style="cursor:pointer">
+              <div class="row-text">
+                <span class="name">${this.escHtml(friendlyName)}</span>
+                <span class="subtitle">${e.entity_id}</span>
+              </div>
+              <div class="row-right">
+                <span class="detail">${itemCount} item${itemCount !== 1 ? 's' : ''}</span>
+              </div>
+            </div>
+          `}).join('')}
+          ${todoEntities.length === 0 ? '<p class="empty-desc">No lists found in Home Assistant</p>' : ''}
+        </div>
+      </div>
+    `
+
+
+    el.querySelectorAll('.entity-row[data-id]').forEach(row => {
+      const checkbox = row.querySelector('input[type="checkbox"]') as HTMLInputElement
+      const entityId = row.getAttribute('data-id')!
+
+      const toggleList = () => {
+        const newEnabled = checkbox.checked
+          ? [...enabled, entityId]
+          : enabled.filter(id => id !== entityId)
+        saveConfig({ enabledTodoLists: newEnabled })
+        this.render()
+      }
+
+      // Click anywhere on the row to toggle
+      row.addEventListener('click', (e) => {
+        e.preventDefault()
+        checkbox.checked = !checkbox.checked
+        toggleList()
+      })
+
+      // Also handle direct checkbox clicks
+      checkbox.addEventListener('click', (e) => {
+        e.stopPropagation()
+        toggleList()
+      })
+    })
   }
 
   private applyTheme() {

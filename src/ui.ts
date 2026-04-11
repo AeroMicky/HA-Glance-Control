@@ -70,6 +70,7 @@ export class UI {
   private sortedRoomNames: string[] = []
   private roomListSortMode: 'custom' | 'recent' = 'custom'
   private roomSortMode = new Map<string, 'custom' | 'recent'>()
+  private enabledTodoLists: string[] = []
   private standbyMode = false
   private stateDebounce: ReturnType<typeof setTimeout> | null = null
   private footerPage = 0
@@ -105,6 +106,7 @@ export class UI {
     roomOrder?: string[]
     roomListSortMode?: 'custom' | 'recent'
     roomSortMode?: Record<string, 'custom' | 'recent'>
+    enabledTodoLists?: string[]
   }) {
     this.favorites = opts.favorites
     this.headerSensors = opts.headerSensors
@@ -121,6 +123,7 @@ export class UI {
         this.roomSortMode.set(name, mode)
       }
     }
+    this.enabledTodoLists = opts.enabledTodoLists ?? []
     // Re-render to reflect config changes
     if (this.startupRendered) {
       this.footerPage = 0
@@ -267,6 +270,11 @@ export class UI {
       } else {
         content = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
       }
+      if (clock.showDate) {
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+        const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+        content += ` ${days[now.getDay()]} ${now.getDate()} ${months[now.getMonth()]}`
+      }
       content += DOT
     }
     // Truncate title to 15 chars max
@@ -338,6 +346,10 @@ export class UI {
     })
   }
 
+  private makeEmptyContainer(id: number): TextContainerProperty {
+    return new TextContainerProperty({ containerID: id, containerName: `pad${id}`, content: '', xPosition: 0, yPosition: 0, width: 1, height: 1, borderWidth: 0, paddingLength: 0, isEventCapture: 0 })
+  }
+
   private makeStatusBorder(): TextContainerProperty {
     return new TextContainerProperty({
       containerID: 4,
@@ -372,7 +384,7 @@ export class UI {
 
   private makeFullScreen(content: string): TextContainerProperty {
     return new TextContainerProperty({
-      containerID: 1,
+      containerID: 2,
       containerName: 'text',
       content,
       xPosition: 0,
@@ -465,7 +477,23 @@ export class UI {
         return this.sortStatusEntities(this.screen.entityIds).map(id => entityLine(id))
       case 'submenu': {
         const e = this.ha.getEntity(this.screen.entityId)
-        return [e?.state?.toUpperCase() ?? '?']
+        const lines: string[] = [e?.state?.toUpperCase() ?? '?']
+        if (e?.attributes) {
+          const a = e.attributes
+          if (a.brightness != null) lines.push(`Bright: ${Math.round((a.brightness as number) / 255 * 100)}%`)
+          if (a.color_temp_kelvin != null) lines.push(`Temp: ${a.color_temp_kelvin}K`)
+          if (a.rgb_color) { const [r, g, b] = a.rgb_color as number[]; lines.push(`RGB: ${r},${g},${b}`) }
+          if (a.current_temperature != null) lines.push(`Temp: ${a.current_temperature}${a.temperature_unit || '\u00b0'}`)
+          if (a.hvac_action) lines.push(`${a.hvac_action}`)
+          if (a.percentage != null) lines.push(`Speed: ${a.percentage}%`)
+          if (a.current_position != null) lines.push(`Pos: ${a.current_position}%`)
+          if (a.media_title) lines.push(`${this.statusTrunc(a.media_title as string)}`)
+          if (a.media_artist) lines.push(`${this.statusTrunc(a.media_artist as string)}`)
+          if (a.source) lines.push(`Src: ${this.statusTrunc(a.source as string)}`)
+          if (a.battery_level != null) lines.push(`Bat: ${a.battery_level}%`)
+          if (a.device_class && !lines.some(l => l.includes(a.device_class as string))) lines.push(`${a.device_class}`)
+        }
+        return lines
       }
       default:
         return []
@@ -574,9 +602,17 @@ export class UI {
     return label ? `${label} ${display}` : display
   }
 
+  private clockDisplayLen(): number {
+    const clock = getConfig().clock ?? { show: true, format: '24h' }
+    if (clock.show === false) return 0
+    const timeLen = clock.format === '12h' ? 7 : 5 // "12:00AM" or "14:00"
+    const dateLen = clock.showDate ? 11 : 0 // " Wed 11 Apr"
+    return timeLen + dateLen + DOT.length
+  }
+
   private headerSensorPages(title: string): string[][] {
     if (this.headerSensors.length === 0) return [[]]
-    const clockLen = getConfig().clock?.show !== false ? 5 + DOT.length : 0  // "HH:MM  /  "
+    const clockLen = this.clockDisplayLen()
     const titleLen = Math.min(title.length, 15) + DOT.length
     const budget = 68 - clockLen - titleLen
     const parts = this.headerSensors.map(s => this.headerSensorPart(s)).filter(Boolean)
@@ -598,7 +634,7 @@ export class UI {
   }
 
   private headerScrollContent(title: string): string {
-    const clockLen = getConfig().clock?.show !== false ? 5 + DOT.length : 0
+    const clockLen = this.clockDisplayLen()
     const titleLen = Math.min(title.length, 15) + DOT.length
     const budget = 68 - clockLen - titleLen
     const parts = this.headerSensors.map(s => this.headerSensorPart(s)).filter(Boolean)
@@ -716,6 +752,7 @@ export class UI {
 
   async render() {
     this.rendering = true
+    const safety = setTimeout(() => { this.rendering = false }, 8000)
     try {
       this.stopStatusRotation()
       // Cancel pending state update to prevent it firing on non-chrome screens
@@ -732,8 +769,13 @@ export class UI {
         case 'confirm':  await this.renderConfirm();  break
         case 'result':   await this.renderResult();   break
         case 'loading':  await this.renderLoading();  break
+        case 'todoLists': await this.renderTodoLists(); break
+        case 'todoList': await this.renderTodoList(); break
+        case 'todoDetail': await this.renderTodoDetail(); break
+        case 'todoRead': await this.renderTodoRead(); break
       }
     } finally {
+      clearTimeout(safety)
       this.rendering = false
     }
   }
@@ -778,7 +820,12 @@ export class UI {
     const recent = getConfig().recentlyUsed.slice(0, 18)
     const favCount = this.favorites.length
     const roomCount = this.rooms.size
-    const items = [`\u2605 Favorites (${favCount}) ${ARROW_R}`, `\u25A3 Rooms (${roomCount}) ${ARROW_R}`]
+    const todoCount = this.enabledTodoLists.length
+    const items = [
+      `\u2605 Favorites (${favCount}) ${ARROW_R}`,
+      `\u25A3 Rooms (${roomCount}) ${ARROW_R}`,
+      `\u25A4 Lists (${todoCount}) ${ARROW_R}`,
+    ]
     for (const id of recent) items.push(this.entityLabel(id))
     await this.renderWithChrome('HA', items)
   }
@@ -786,7 +833,7 @@ export class UI {
   private async renderFavorites() {
     if (this.favorites.length === 0) {
       await this.rebuildPage({
-        containerTotalNum: 1,
+        containerTotalNum: 2,
         textObject: [this.makeFullScreen('\n\nNo favorites yet\n\nAdd entities using the\ncompanion app on your phone')],
       })
       return
@@ -800,7 +847,7 @@ export class UI {
     const roomNames = this.getSortedRoomNames()
     if (roomNames.length === 0) {
       await this.rebuildPage({
-        containerTotalNum: 1,
+        containerTotalNum: 2,
         textObject: [this.makeFullScreen('\n\nNo rooms configured\n\nConfigure rooms using the\ncompanion app on your phone')],
       })
       return
@@ -823,6 +870,236 @@ export class UI {
     const items = entityIds.map(id => this.entityLabel(id))
     const c = this.countStates(entityIds)
     await this.renderWithChrome(`${name} ${c.on}/${c.total}`, items)
+  }
+
+  // --- Todo: state ---
+  private todoSortedItems: import('./ha-client').TodoItem[] = []
+  private todoSelectedIdx = 0
+
+  // --- Todo: date formatting ---
+  private formatTodoDue(due?: string): string {
+    if (!due) return ''
+    const d = new Date(due)
+    const hasTime = due.includes('T') || /\d{4}-\d{2}-\d{2} \d{2}:/.test(due)
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const dLocal = hasTime ? d : new Date(d.getFullYear(), d.getMonth(), d.getDate())
+    const overdueFrom = hasTime ? d : new Date(dLocal.getTime() + 86400000)
+    const diffMs = now.getTime() - overdueFrom.getTime()
+    const overdue = diffMs > 0
+    const absDiffMin = Math.floor(Math.abs(diffMs) / 60000)
+    const absDiffHrs = Math.floor(Math.abs(diffMs) / 3600000)
+    const target = new Date(dLocal.getFullYear(), dLocal.getMonth(), dLocal.getDate())
+    const diffDays = Math.round((target.getTime() - today.getTime()) / 86400000)
+    if (overdue) {
+      if (absDiffMin < 1) return 'Just now'
+      if (absDiffMin < 60) return `${absDiffMin} min ago`
+      if (absDiffHrs < 24) return `${absDiffHrs} hr${absDiffHrs > 1 ? 's' : ''} ago`
+      const days = Math.floor(absDiffHrs / 24)
+      if (days === 1) return '1 day ago'
+      if (days < 7) return `${days} days ago`
+      const weeks = Math.floor(days / 7)
+      if (weeks === 1) return '1 week ago'
+      if (weeks < 4) return `${weeks} weeks ago`
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+      return `${dLocal.getDate()} ${months[dLocal.getMonth()]}`
+    }
+    if (hasTime && absDiffMin < 60) return `In ${absDiffMin} min`
+    if (hasTime && absDiffHrs < 6) return `In ${absDiffHrs} hr${absDiffHrs > 1 ? 's' : ''}`
+    if (diffDays === 0) {
+      if (!hasTime) return 'Today'
+      const clock = getConfig().clock ?? { show: true, format: '24h' }
+      if (clock.format === '12h') {
+        const h = d.getHours() % 12 || 12
+        return `Today ${h}:${String(d.getMinutes()).padStart(2,'0')}${d.getHours() < 12 ? 'am' : 'pm'}`
+      }
+      return `Today ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`
+    }
+    if (diffDays === 1) return 'Tomorrow'
+    if (diffDays > 1 && diffDays <= 6) return `In ${diffDays} days`
+    const weeks = Math.floor(Math.abs(diffDays) / 7)
+    if (weeks === 1) return 'In 1 week'
+    if (weeks > 1 && weeks < 5) return `In ${weeks} weeks`
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    return `${dLocal.getDate()} ${months[dLocal.getMonth()]}`
+  }
+
+  // --- Todo: item label builder (max 62 chars for SDK) ---
+  private todoItemLabel(item: import('./ha-client').TodoItem): string {
+    const MAX = 62
+    const icon = item.done ? '\u25cf' : '\u25cb'
+    const due = this.formatTodoDue(item.due)
+    const desc = item.description ? item.description.replace(/\n/g, ' ').trim() : ''
+    const summaryMax = due ? Math.min(item.summary.length, 24) : Math.min(item.summary.length, 36)
+    let line = `${icon} ${this.truncate(item.summary, summaryMax)}`
+    if (due) line += `  ${due}`
+    if (desc) {
+      const remaining = MAX - line.length - 2
+      if (remaining > 4) line += `  ${this.truncate(desc, remaining)}`
+    }
+    return line.substring(0, MAX)
+  }
+
+  // --- Todo: renderers (ALL use renderWithChrome — proven on glasses) ---
+
+  private async renderTodoLists() {
+    const allTodoEntities = this.ha.getTodoEntities()
+    const todoEntities = allTodoEntities.filter(e => this.enabledTodoLists.includes(e.entity_id))
+    if (todoEntities.length === 0) {
+      await this.renderWithChrome('Lists', ['No lists enabled'])
+      return
+    }
+    // Single list — show entity name with item count from state
+    if (todoEntities.length === 1) {
+      const entity = todoEntities[0]
+      const name = (entity.attributes?.friendly_name as string) || entity.entity_id.split('.').pop() || ''
+      this.screenStack[this.screenStack.length - 1] = { type: 'todoList', entityId: entity.entity_id }
+      this.todoSortedItems = [] // will be populated on click
+      await this.renderWithChrome(name, [`Load ${entity.state ?? ''} items ${ARROW_R}`])
+      return
+    }
+    // Multiple lists — show names with counts from entity state (no fetch)
+    const labels = todoEntities.map(entity => {
+      const name = (entity.attributes?.friendly_name as string) || entity.entity_id.split('.').pop() || ''
+      return `${name} (${entity.state ?? '?'}) ${ARROW_R}`
+    })
+    await this.renderWithChrome(`Lists (${todoEntities.length})`, labels)
+  }
+
+  private async renderTodoList() {
+    if (this.screen.type !== 'todoList') return
+    const { entityId } = this.screen
+    const name = (this.ha.getEntity(entityId)?.attributes?.friendly_name as string) || entityId.split('.').pop() || ''
+    if (this.todoSortedItems.length === 0) {
+      await this.renderWithChrome(name, ['No items'])
+      return
+    }
+    const pending = this.todoSortedItems.filter(i => !i.done)
+    const done = this.todoSortedItems.filter(i => i.done)
+    const labels = this.todoSortedItems.map(i => this.todoItemLabel(i))
+    await this.renderWithChrome(`${name}  ${done.length}/${pending.length + done.length} done`, labels)
+  }
+
+  private async renderTodoDetail() {
+    if (this.screen.type !== 'todoDetail') return
+    const item = this.todoSortedItems.find(i => i.uid === this.screen.itemUid)
+    if (!item) { await this.goBack(); return }
+    const icon = item.done ? '\u25cf' : '\u25cb'
+    const actionLabel = item.done ? '\u25cb Mark pending' : '\u25cf Mark done'
+    const labels: string[] = [actionLabel]
+    // Info lines
+    const info: string[] = []
+    if (item.due) info.push(`Due: ${this.formatTodoDue(item.due)}`)
+    info.push(item.done ? 'Status: Done' : 'Status: Pending')
+    if (item.description) {
+      const desc = this.truncate(item.description.replace(/\n/g, ' ').trim(), 50)
+      info.push(desc)
+      if (item.description.length > 50) labels.push(`Read full ${ARROW_R}`)
+    }
+    labels.push(...info)
+    await this.renderWithChrome(`${icon} ${this.truncate(item.summary, 40)}`, labels)
+  }
+
+  private async renderTodoRead() {
+    if (this.screen.type !== 'todoRead') return
+    const { text, title } = this.screen
+    // Split text into scrollable list items (SDK scrolls lists natively)
+    const lines = text.replace(/\r/g, '').split('\n')
+    const items: string[] = []
+    for (const line of lines) {
+      if (items.length >= 19) break
+      if (line.length <= 60) { items.push(line || ' '); continue }
+      // Word wrap long lines
+      const words = line.split(/\s+/)
+      let cur = ''
+      for (const w of words) {
+        if (items.length >= 19) break
+        if ((cur + ' ' + w).length > 60) { items.push(cur); cur = w }
+        else cur = (cur + ' ' + w).trim()
+      }
+      if (cur && items.length < 19) items.push(cur)
+    }
+    await this.renderWithChrome(this.truncate(title, 40), items)
+  }
+
+  // --- Todo: event handlers ---
+
+  private async todoListsSelect(idx: number) {
+    const allTodoEntities = this.ha.getTodoEntities()
+    const todoEntities = allTodoEntities.filter(e => this.enabledTodoLists.includes(e.entity_id))
+    if (idx >= todoEntities.length) return
+    const entityId = todoEntities[idx].entity_id
+    // Fetch items NOW (in event handler, outside render)
+    let items: import('./ha-client').TodoItem[] = []
+    try {
+      items = await Promise.race([
+        this.ha.getTodoItems(entityId),
+        new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 5000)),
+      ])
+    } catch { /* empty */ }
+    const pending = items.filter(i => !i.done)
+    const done = items.filter(i => i.done)
+    this.todoSortedItems = [...pending, ...done].slice(0, 20)
+    this.push({ type: 'todoList', entityId })
+    await this.render()
+  }
+
+  private async todoItemSelect(idx: number) {
+    if (this.screen.type !== 'todoList') return
+    // First item is "Load items" when list is empty
+    if (this.todoSortedItems.length === 0) {
+      const eid = this.screen.entityId
+      let items: import('./ha-client').TodoItem[] = []
+      try {
+        items = await Promise.race([
+          this.ha.getTodoItems(eid),
+          new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 5000)),
+        ])
+      } catch { /* empty */ }
+      const pending = items.filter(i => !i.done)
+      const done = items.filter(i => i.done)
+      this.todoSortedItems = [...pending, ...done].slice(0, 20)
+      await this.render()
+      return
+    }
+    if (idx >= this.todoSortedItems.length) return
+    const item = this.todoSortedItems[idx]
+    this.push({ type: 'todoDetail', entityId: this.screen.entityId, itemUid: item.uid })
+    await this.render()
+  }
+
+  private async todoDetailSelect(idx: number) {
+    if (this.screen.type !== 'todoDetail') return
+    const { entityId, itemUid } = this.screen
+    const item = this.todoSortedItems.find(i => i.uid === itemUid)
+    if (!item) return
+    if (idx === 0) {
+      // Toggle done/pending
+      const markingDone = !item.done
+      const success = await this.ha.updateTodoItem(entityId, item.uid, markingDone)
+      const action = markingDone ? 'Marked done' : 'Marked pending'
+      // Refresh items
+      try {
+        const fresh = await Promise.race([
+          this.ha.getTodoItems(entityId),
+          new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 5000)),
+        ])
+        const p = fresh.filter(i => !i.done)
+        const d = fresh.filter(i => i.done)
+        this.todoSortedItems = [...p, ...d].slice(0, 20)
+      } catch { /* keep old */ }
+      this.screenStack.pop()
+      this.push({ type: 'result', entityId, success, action })
+      await this.render()
+      this.resultTimer = setTimeout(() => {
+        if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
+        this.render().catch(console.error)
+      }, 1500)
+    } else if (idx === 1 && item.description) {
+      // Read full description
+      this.push({ type: 'todoRead', text: item.description, title: this.truncate(item.summary, 40) })
+      await this.render()
+    }
   }
 
   private async renderSubmenu() {
@@ -856,7 +1133,7 @@ export class UI {
     await this.rebuildPage({
       containerTotalNum: 2,
       listObject: [new ListContainerProperty({
-        containerID: 7,
+        containerID: 1,
         containerName: 'confirm',
         xPosition: UI.ACTION_BOX_X,
         yPosition: 10,
@@ -887,7 +1164,7 @@ export class UI {
 
   private makeFullCentered(line1: string, line2: string, line3?: string, yPos?: number): TextContainerProperty {
     return new TextContainerProperty({
-      containerID: 10,
+      containerID: 2,
       containerName: 'action',
       content: [line1, line2, line3].filter(Boolean).join('\n'),
       xPosition: UI.ACTION_BOX_X,
@@ -910,7 +1187,7 @@ export class UI {
     const icon = success ? '\u2713' : '\u2717'
 
     await this.rebuildPage({
-      containerTotalNum: 1,
+      containerTotalNum: 2,
       textObject: [this.makeFullCentered(
         `${icon} ${success ? 'Success' : 'Failed'}`,
         name,
@@ -923,7 +1200,7 @@ export class UI {
     if (this.screen.type !== 'loading') return
     const lines = this.screen.message.split('\n')
     await this.rebuildPage({
-      containerTotalNum: 1,
+      containerTotalNum: 2,
       textObject: [this.makeFullCentered(
         'Sending...',
         this.truncate(lines[0] || '', 26),
@@ -934,9 +1211,14 @@ export class UI {
 
   // --- Event handling ---
 
+  private eventBusy = false
   private async handleEvent(eventType: OsEventTypeList, idx: number): Promise<void> {
+    if (this.rendering || this.eventBusy) return
     if (eventType === OsEventTypeList.SCROLL_TOP_EVENT ||
         eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+      if (this.screen.type === 'todoList') {
+        await this.todoListScrolled(eventType)
+      }
       return
     }
     if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
@@ -952,15 +1234,24 @@ export class UI {
     if (this.standbyMode) return
     if (eventType !== OsEventTypeList.CLICK_EVENT) return
 
-    switch (this.screen.type) {
-      case 'home':      await this.homeSelect(idx);       break
-      case 'favorites': await this.favoriteSelect(idx);  break
-      case 'rooms':     await this.roomSelect(idx);      break
-      case 'room':      await this.roomEntitySelect(idx); break
-      case 'submenu':   await this.submenuSelect(idx);  break
-      case 'confirm':   await this.confirmSelect(idx);  break
-      case 'result':
-      case 'loading':   await this.goBack();            break
+    this.eventBusy = true
+    try {
+      switch (this.screen.type) {
+        case 'home':      await this.homeSelect(idx);       break
+        case 'favorites': await this.favoriteSelect(idx);  break
+        case 'rooms':     await this.roomSelect(idx);      break
+        case 'room':      await this.roomEntitySelect(idx); break
+        case 'submenu':   await this.submenuSelect(idx);  break
+        case 'confirm':   await this.confirmSelect(idx);  break
+        case 'result':
+        case 'loading':   await this.goBack();            break
+        case 'todoLists': await this.todoListsSelect(idx); break
+        case 'todoList':  await this.todoItemSelect(idx);  break
+        case 'todoDetail': await this.todoDetailSelect(idx); break
+        case 'todoRead': break // double-tap to go back, no click action
+      }
+    } finally {
+      this.eventBusy = false
     }
   }
 
@@ -972,12 +1263,7 @@ export class UI {
     // Scenes and scripts run immediately — no confirm needed
     if (domain === 'scene' || domain === 'script') {
       const { action, serviceCall } = defaultServiceCall(entityId, entity?.state ?? 'unknown')
-      this.push({ type: 'loading', message: `${action}\n${this.entityName(entityId)}` })
-      await this.render()
-      const minWait = new Promise(r => setTimeout(r, 800))
-      const callResult = this.ha.callServiceWithData(serviceCall.domain, serviceCall.service, serviceCall.entityId, serviceCall.serviceData)
-      const [success] = await Promise.all([callResult, minWait])
-      this.screenStack.pop()
+      const success = await this.ha.callServiceWithData(serviceCall.domain, serviceCall.service, serviceCall.entityId, serviceCall.serviceData)
       if (success) this.addToRecent(entityId)
       this.push({ type: 'result', entityId, success, action })
       await this.render()
@@ -1000,9 +1286,10 @@ export class UI {
   private async homeSelect(idx: number) {
     if (idx === 0) { this.push({ type: 'favorites' }); await this.render() }
     else if (idx === 1) { this.push({ type: 'rooms' }); await this.render() }
+    else if (idx === 2) { this.push({ type: 'todoLists' }); await this.render() }
     else {
       const recent = getConfig().recentlyUsed
-      const recentIdx = idx - 2
+      const recentIdx = idx - 3
       if (recentIdx < recent.length) await this.entitySelect(recent[recentIdx])
     }
   }
@@ -1079,31 +1366,25 @@ export class UI {
   private async confirmExecute() {
     if (this.screen.type !== 'confirm') return
     const { entityId, action, serviceCall } = this.screen
-    const name = this.entityName(entityId)
-    this.push({ type: 'loading', message: `${action}\n${name}` })
-    await this.render()
-    // Ensure loading screen is visible for at least 800ms
-    const minWait = new Promise(r => setTimeout(r, 800))
-    const callResult = this.ha.callServiceWithData(
+    const success = await this.ha.callServiceWithData(
       serviceCall.domain,
       serviceCall.service,
       serviceCall.entityId,
       serviceCall.serviceData
     )
-    const [success] = await Promise.all([callResult, minWait])
-    this.screenStack.pop() // remove loading
     if (success) this.addToRecent(entityId)
+    this.screenStack.pop() // remove confirm
     this.push({ type: 'result', entityId, success, action })
     await this.render()
     this.resultTimer = setTimeout(() => {
       if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
-      if (this.screenStack[this.screenStack.length - 1]?.type === 'confirm') this.screenStack.pop()
       this.postActionNavigate().catch(console.error)
     }, 2000)
   }
 
   private async goBack() {
     if (this.resultTimer) { clearTimeout(this.resultTimer); this.resultTimer = null }
+    this.stopTodoDescScroll()
     if (this.screenStack.length > 1) this.screenStack.pop()
     await this.render()
   }
@@ -1257,3 +1538,7 @@ type Screen =
   | { type: 'confirm'; entityId: string; action: string; serviceCall: ServiceCall }
   | { type: 'result'; entityId: string; success: boolean; action: string }
   | { type: 'loading'; message: string }
+  | { type: 'todoLists' }
+  | { type: 'todoList'; entityId: string }
+  | { type: 'todoDetail'; entityId: string; itemUid: string }
+  | { type: 'todoRead'; text: string; title: string }
