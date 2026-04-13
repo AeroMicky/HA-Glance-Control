@@ -10,8 +10,7 @@
     "sim": "cd screenshots && evenhub-simulator http://localhost:5173",
     "pack": "vitest run && tsc --noEmit && vite build && node scripts/build.mjs",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "screenshot": "node screenshot.mjs"
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",

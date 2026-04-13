@@ -12,6 +12,10 @@ screenshots/
 # SDK design assets (large, not needed for build)
 design-guidelines/
 
+# Dev-only tools
+icon-gen.html
+screenshot.mjs
+
 # Simulator raw screenshots (use `npm run screenshot <name>` to save properly)
 glasses_*.png
 app_*.png
