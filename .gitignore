@@ -3,6 +3,15 @@ dist
 *.ehpk
 .env
 
+# Internal task tracking (contains local IPs, session data)
+.tasks/
+
+# Screenshots may contain personal info from dev portals
+screenshots/
+
+# SDK design assets (large, not needed for build)
+design-guidelines/
+
 # Simulator raw screenshots (use `npm run screenshot <name>` to save properly)
 glasses_*.png
 app_*.png

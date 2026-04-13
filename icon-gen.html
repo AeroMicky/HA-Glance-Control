@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<body style="margin:0;background:#000">
+<canvas id="c" width="512" height="512"></canvas>
+<script>
+const c = document.getElementById('c')
+const ctx = c.getContext('2d')
+const s = 512
+
+// Background - dark rounded square
+ctx.fillStyle = '#1a1a2e'
+ctx.beginPath()
+ctx.roundRect(0, 0, s, s, 80)
+ctx.fill()
+
+// House shape - Home Assistant style
+const cx = s / 2, cy = s / 2 - 20
+
+// Outer glow
+ctx.shadowColor = '#4fc3f7'
+ctx.shadowBlur = 30
+
+// Roof
+ctx.strokeStyle = '#4fc3f7'
+ctx.lineWidth = 16
+ctx.lineCap = 'round'
+ctx.lineJoin = 'round'
+ctx.beginPath()
+ctx.moveTo(80, cy + 40)
+ctx.lineTo(cx, 80)
+ctx.lineTo(s - 80, cy + 40)
+ctx.stroke()
+
+// Walls
+ctx.beginPath()
+ctx.moveTo(120, cy + 30)
+ctx.lineTo(120, s - 120)
+ctx.lineTo(s - 120, s - 120)
+ctx.lineTo(s - 120, cy + 30)
+ctx.stroke()
+
+// Door
+ctx.fillStyle = '#4fc3f7'
+ctx.shadowBlur = 20
+ctx.beginPath()
+ctx.roundRect(cx - 40, cy + 80, 80, 120, 12)
+ctx.fill()
+
+// Door inner (dark)
+ctx.fillStyle = '#1a1a2e'
+ctx.shadowBlur = 0
+ctx.beginPath()
+ctx.roundRect(cx - 28, cy + 92, 56, 96, 8)
+ctx.fill()
+
+// Small circle on door (handle)
+ctx.fillStyle = '#4fc3f7'
+ctx.beginPath()
+ctx.arc(cx + 14, cy + 140, 6, 0, Math.PI * 2)
+ctx.fill()
+
+// Text "HA" below
+ctx.shadowColor = '#4fc3f7'
+ctx.shadowBlur = 15
+ctx.fillStyle = '#4fc3f7'
+ctx.font = 'bold 48px -apple-system, sans-serif'
+ctx.textAlign = 'center'
+ctx.fillText('HOME ASSISTANT', cx, s - 50)
+
+// Download link
+const link = document.createElement('a')
+link.download = 'icon.png'
+link.href = c.toDataURL('image/png')
+link.textContent = 'Download Icon'
+link.style.cssText = 'position:fixed;top:10px;left:10px;color:#fff;font-size:20px'
+document.body.appendChild(link)
+</script>
+</body>
+</html>

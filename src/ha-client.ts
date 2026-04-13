@@ -131,12 +131,17 @@ export class HAClient {
         const event = msg.event as Record<string, unknown>
         if (event.event_type === 'state_changed') {
           const data = event.data as Record<string, unknown>
-          const newState = data.new_state as HAEntity
+          const newState = data.new_state as HAEntity | null
+          const entityId = (data.entity_id as string) ?? (newState?.entity_id)
           if (newState) {
             this.entities.set(newState.entity_id, newState)
             this.stateCallbacks.forEach(cb =>
               cb(newState.entity_id, newState.state, newState.attributes)
             )
+          } else if (entityId) {
+            // Entity deleted — remove from cache
+            this.entities.delete(entityId)
+            this.stateCallbacks.forEach(cb => cb(entityId, '', {}))
           }
         }
         break
@@ -346,5 +351,42 @@ export class HAClient {
       item: uid,
       status: done ? 'completed' : 'needs_action',
     })
+  }
+
+  async editTodoItem(
+    entityId: string,
+    uid: string,
+    updates: { rename?: string; description?: string; due?: string | null; done?: boolean }
+  ): Promise<boolean> {
+    const data: Record<string, unknown> = { item: uid }
+    if (updates.rename !== undefined) data.rename = updates.rename
+    if (updates.description !== undefined) data.description = updates.description
+    if (updates.done !== undefined) data.status = updates.done ? 'completed' : 'needs_action'
+    if (updates.due !== undefined) {
+      if (updates.due === null || updates.due === '') {
+        // Clear due — HA accepts empty string for both fields to clear
+        data.due_datetime = ''
+      } else if (updates.due.includes('T')) {
+        data.due_datetime = updates.due
+      } else {
+        data.due_date = updates.due
+      }
+    }
+    return this.callServiceWithData('todo', 'update_item', entityId, data)
+  }
+
+  async removeTodoItem(entityId: string, uid: string): Promise<boolean> {
+    return this.callServiceWithData('todo', 'remove_item', entityId, { item: uid })
+  }
+
+  async addTodoItem(entityId: string, summary: string, description?: string, due?: string): Promise<boolean> {
+    const data: Record<string, unknown> = { item: summary }
+    if (description) data.description = description
+    if (due) {
+      // "YYYY-MM-DD" → due_date; "YYYY-MM-DDTHH:mm[:ss]" → due_datetime
+      if (due.includes('T')) data.due_datetime = due
+      else data.due_date = due
+    }
+    return this.callServiceWithData('todo', 'add_item', entityId, data)
   }
 }

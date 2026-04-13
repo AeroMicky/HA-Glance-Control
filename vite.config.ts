@@ -11,5 +11,6 @@ export default defineConfig({
   },
   define: {
     __APP_VERSION__: JSON.stringify(appJson.version),
+    __APP_NAME__: JSON.stringify(appJson.name),
   },
 })

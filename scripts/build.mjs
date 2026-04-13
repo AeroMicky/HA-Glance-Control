@@ -9,7 +9,7 @@ console.log(`[build] Packaging version ${version}...`)
 
 try {
   // Pack with versioned filename
-  const output = `g2-home-assistant-v${version}.ehpk`
+  const output = `ha-${version}.ehpk`
   execSync(`npx evenhub pack app.json dist -o ${output}`, { stdio: 'inherit' })
   console.log(`[build] ✓ Packaged to ${output}`)
 } catch (err) {

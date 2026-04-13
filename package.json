@@ -8,21 +8,22 @@
     "build": "vite build",
     "preview": "vite preview",
     "sim": "cd screenshots && evenhub-simulator http://localhost:5173",
-    "pack": "vite build && evenhub pack app.json dist -o g2-home-assistant.ehpk",
+    "pack": "vitest run && tsc --noEmit && vite build && node scripts/build.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "screenshot": "node screenshot.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.9",
-    "@jappyjan/even-better-sdk": "^0.0.11",
-    "@playwright/test": "^1.59.1"
+    "@evenrealities/even_hub_sdk": "^0.0.9"
   },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.11",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "typescript": "^6.0.2",
-    "vite": "^8.0.7"
+    "vite": "^8.0.7",
+    "vitest": "^4.1.4"
   }
 }

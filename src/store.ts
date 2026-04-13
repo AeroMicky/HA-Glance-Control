@@ -65,6 +65,8 @@ export interface AppConfig {
   customNames: Record<string, string>
   customIcons: Record<string, string>
   enabledTodoLists: string[]  // entity_ids of enabled todo lists
+  autoStandbySeconds: number  // 0 = disabled; otherwise seconds of inactivity before glasses return to standby
+  configVersion: number        // schema version for deterministic migration
   // Legacy — kept for migration
   dashboard?: DashboardSlot[]
   energySlots?: EnergySlot[]
@@ -93,6 +95,8 @@ const DEFAULT_CONFIG: AppConfig = {
   customNames: {},
   customIcons: {},
   enabledTodoLists: [],
+  autoStandbySeconds: 60,
+  configVersion: 2,
 }
 
 type ConfigListener = (config: AppConfig) => void
@@ -124,35 +128,39 @@ export async function loadConfig(): Promise<AppConfig> {
     const raw = await bridgeGet(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY)
     if (raw) {
       config = { ...DEFAULT_CONFIG, ...JSON.parse(raw) }
-      // Migrate legacy data
-      if (config.headerSensors.length === 0) {
-        // Migrate energySlots -> headerSensors
-        if (config.energySlots && config.energySlots.length > 0) {
-          config.headerSensors = config.energySlots.map(s => ({ ...s, unit: '' }))
+      // Version-based migration
+      if (!config.configVersion || config.configVersion < 2) {
+        // v1 -> v2: migrate legacy sensor/dashboard formats
+        if (config.headerSensors.length === 0) {
+          if (config.energySlots && config.energySlots.length > 0) {
+            config.headerSensors = config.energySlots.map(s => ({ ...s, unit: '' }))
+          } else if (config.energy) {
+            const e = config.energy
+            const slots: SensorSlot[] = []
+            if (e.battery_level) slots.push({ entity_id: e.battery_level, label: config.customNames[e.battery_level] || 'Battery', icon: 'battery', showBar: true })
+            if (e.battery_power) slots.push({ entity_id: e.battery_power, label: config.customNames[e.battery_power] || 'Power', icon: 'bolt' })
+            if (e.time_remaining) slots.push({ entity_id: e.time_remaining, label: config.customNames[e.time_remaining] || 'Time', icon: 'timer' })
+            if (e.ev_charging_amps) slots.push({ entity_id: e.ev_charging_amps, label: config.customNames[e.ev_charging_amps] || 'EV', icon: 'bolt' })
+            config.headerSensors = slots
+          }
         }
-        // Migrate legacy energy -> headerSensors
-        else if (config.energy) {
-          const e = config.energy
-          const slots: SensorSlot[] = []
-          if (e.battery_level) slots.push({ entity_id: e.battery_level, label: config.customNames[e.battery_level] || 'Battery', icon: 'battery', showBar: true })
-          if (e.battery_power) slots.push({ entity_id: e.battery_power, label: config.customNames[e.battery_power] || 'Power', icon: 'bolt' })
-          if (e.time_remaining) slots.push({ entity_id: e.time_remaining, label: config.customNames[e.time_remaining] || 'Time', icon: 'timer' })
-          if (e.ev_charging_amps) slots.push({ entity_id: e.ev_charging_amps, label: config.customNames[e.ev_charging_amps] || 'EV', icon: 'bolt' })
-          config.headerSensors = slots
+        if (config.footerSensors.length === 0 && config.dashboard && config.dashboard.length > 0) {
+          config.footerSensors = config.dashboard.map(s => ({
+            entity_id: s.entity_id,
+            label: s.label,
+            unit: s.unit,
+            icon: config.customIcons[s.entity_id],
+          }))
         }
+        delete config.energy
+        delete config.energySlots
+        delete config.dashboard
+        config.configVersion = 2
+        // Persist migrated config
+        const json = JSON.stringify(config)
+        localStorage.setItem(STORAGE_KEY, json)
+        bridgeSet(STORAGE_KEY, json)
       }
-      if (config.footerSensors.length === 0 && config.dashboard && config.dashboard.length > 0) {
-        config.footerSensors = config.dashboard.map(s => ({
-          entity_id: s.entity_id,
-          label: s.label,
-          unit: s.unit,
-          icon: config.customIcons[s.entity_id],
-        }))
-      }
-      // Clean up legacy
-      delete config.energy
-      delete config.energySlots
-      delete config.dashboard
     }
   } catch {
     config = { ...DEFAULT_CONFIG }

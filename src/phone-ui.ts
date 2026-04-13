@@ -38,7 +38,11 @@ export class PhoneUI {
     this.root = root
     this.onConnect = onConnect
     this.applyTheme()
-    loadConfig().then(() => this.render())
+    loadConfig().then(() => {
+      const cfg = getConfig()
+      if (cfg.ha_url && cfg.ha_token) this.tab = 'todoLists'
+      this.render()
+    })
   }
 
   setConnectError(msg: string) {
@@ -53,15 +57,15 @@ export class PhoneUI {
     this.root.innerHTML = `
       <div class="app">
         <header>
-          <h1>HA Glance & Control <small>v${__APP_VERSION__}</small></h1>
+          <h1>${__APP_NAME__} <small>v${__APP_VERSION__}</small></h1>
           <span class="status ${connected ? 'on' : 'off'}">${connected ? 'Connected' : 'Disconnected'}</span>
         </header>
         <nav>
-          ${this.tabBtn('connection', 'Setup')}
+          ${this.tabBtn('todoLists', 'Lists')}
           ${this.tabBtn('favorites', 'Favs')}
           ${this.tabBtn('rooms', 'Rooms')}
           ${this.tabBtn('sensors', 'Sensors')}
-          ${this.tabBtn('todoLists', 'Lists')}
+          ${this.tabBtn('connection', 'Setup')}
         </nav>
         <main id="tab-content"></main>
       </div>
@@ -162,6 +166,31 @@ export class PhoneUI {
                   <span class="subtitle">${descs[mode]}</span>
                 </div>
                 <div class="row-right"><span class="checkbox ${current === mode ? 'checked' : ''}">&#10003;</span></div>
+              </div>
+            `}).join('')}
+          </div>
+        </div>
+
+        <label>Auto Standby</label>
+        <p class="hint" style="margin-top:0">Return glasses to standby after inactivity. Prevents accidental taps.</p>
+        <div class="card">
+          <div class="entity-list" id="auto-standby-options">
+            ${([
+              { val: 0, label: 'Off', desc: 'Double-click only' },
+              { val: 15, label: '15 seconds', desc: 'Quick glance' },
+              { val: 30, label: '30 seconds', desc: 'Default' },
+              { val: 60, label: '1 minute', desc: 'Balanced' },
+              { val: 120, label: '2 minutes', desc: 'Reading or browsing' },
+              { val: 300, label: '5 minutes', desc: 'Long-form' },
+            ]).map(opt => {
+              const current = config.autoStandbySeconds ?? 0
+              return `
+              <div class="entity-row auto-standby-option" data-secs="${opt.val}">
+                <div class="row-text">
+                  <span class="name">${opt.label}</span>
+                  ${opt.desc ? `<span class="subtitle">${opt.desc}</span>` : ''}
+                </div>
+                <div class="row-right"><span class="checkbox ${current === opt.val ? 'checked' : ''}">&#10003;</span></div>
               </div>
             `}).join('')}
           </div>
@@ -278,6 +307,14 @@ export class PhoneUI {
       })
     })
 
+    el.querySelectorAll('.auto-standby-option').forEach(row => {
+      row.addEventListener('click', () => {
+        const secs = parseInt(row.getAttribute('data-secs') || '0', 10)
+        saveConfig({ autoStandbySeconds: secs })
+        this.render()
+      })
+    })
+
     el.querySelector('#export-config')?.addEventListener('click', () => {
       const { ha_url, ha_token, ...cfg } = getConfig()
       const json = JSON.stringify(cfg, null, 2)
@@ -354,7 +391,7 @@ export class PhoneUI {
       this.render()
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
-      status.innerHTML = `Failed: ${msg}<br><br><small>Common fixes:<br>
+      status.innerHTML = `Failed: ${this.escHtml(msg)}<br><br><small>Common fixes:<br>
         - URL must start with wss:// (Nabu Casa) or ws:// (local)<br>
         - URL must end with /api/websocket<br>
         - Check browser console (F12) for details</small>`
@@ -1224,7 +1261,7 @@ export class PhoneUI {
             const current = getConfig().favorites
             saveConfig({ favorites: current.filter(f => f.entity_id !== entityId) })
           } else {
-            const current = getConfig().dashboard
+            const current = getConfig().dashboard ?? []
             saveConfig({ dashboard: current.filter(s => s.entity_id !== entityId) })
           }
           this.dismissOverlay()
@@ -1458,30 +1495,67 @@ export class PhoneUI {
     const todoEntities = this.ha.getTodoEntities()
     const enabled = config.enabledTodoLists ?? []
 
+    const enabledEntities = todoEntities.filter(e => enabled.includes(e.entity_id))
     el.innerHTML = `
       <p class="section-header">Lists (${todoEntities.length})</p>
       <p class="hint" style="margin-top:0">Select which lists appear on the glasses.</p>
-      <div class="card">
-        <div class="entity-list">
-          ${todoEntities.map(e => {
-            const isEnabled = enabled.includes(e.entity_id)
-            const itemCount = parseInt(e.state) || 0
-            const friendlyName = (e.attributes?.friendly_name as string) || e.entity_id.split('.').pop() || e.entity_id
-            return `
-            <div class="entity-row" data-id="${e.entity_id}" style="cursor:pointer;user-select:none">
-              <input type="checkbox" ${isEnabled ? 'checked' : ''} style="cursor:pointer">
-              <div class="row-text">
-                <span class="name">${this.escHtml(friendlyName)}</span>
-                <span class="subtitle">${e.entity_id}</span>
-              </div>
-              <div class="row-right">
-                <span class="detail">${itemCount} item${itemCount !== 1 ? 's' : ''}</span>
-              </div>
-            </div>
-          `}).join('')}
-          ${todoEntities.length === 0 ? '<p class="empty-desc">No lists found in Home Assistant</p>' : ''}
+      ${todoEntities.length === 0 ? `
+        <div class="card">
+          <p class="empty-title">No to-do lists found</p>
+          <p class="empty-desc" style="margin-top:8px">
+            To use Lists on your glasses, create a to-do list in Home Assistant first.
+            Open HA → Settings → Devices &amp; Services → Helpers → + Create Helper → To-do list.
+            Your new list will appear here automatically.
+          </p>
         </div>
-      </div>
+      ` : `
+        <div class="card">
+          <div class="entity-list">
+            ${todoEntities.map(e => {
+              const isEnabled = enabled.includes(e.entity_id)
+              const itemCount = parseInt(e.state) || 0
+              const friendlyName = (e.attributes?.friendly_name as string) || e.entity_id.split('.').pop() || e.entity_id
+              return `
+              <div class="entity-row" data-id="${e.entity_id}" style="cursor:pointer;user-select:none">
+                <input type="checkbox" ${isEnabled ? 'checked' : ''} style="cursor:pointer">
+                <div class="row-text">
+                  <span class="name">${this.escHtml(friendlyName)}</span>
+                  <span class="subtitle">${e.entity_id}</span>
+                </div>
+                <div class="row-right">
+                  <span class="detail">${itemCount} item${itemCount !== 1 ? 's' : ''}</span>
+                </div>
+              </div>
+            `}).join('')}
+          </div>
+        </div>
+      `}
+      ${enabledEntities.length > 0 ? `
+        ${enabledEntities.length > 1 ? `
+          <p class="section-header" style="margin-top:16px">List</p>
+          <div class="custom-select" id="items-list-wrap">
+            <button type="button" class="cs-trigger" id="items-list-btn">
+              <span class="cs-label">${this.escHtml((enabledEntities[0].attributes?.friendly_name as string) || enabledEntities[0].entity_id.split('.').pop() || enabledEntities[0].entity_id)}</span>
+              <span class="cs-chevron">&#9662;</span>
+            </button>
+            <input type="hidden" id="items-list-input" value="${enabledEntities[0].entity_id}">
+            <div class="cs-menu" id="items-list-menu" hidden>
+              ${enabledEntities.map(e => {
+                const name = (e.attributes?.friendly_name as string) || e.entity_id.split('.').pop() || e.entity_id
+                return `<button type="button" class="cs-option" data-value="${e.entity_id}" data-label="${this.escHtml(name)}">${this.escHtml(name)}</button>`
+              }).join('')}
+            </div>
+          </div>
+        ` : `<input type="hidden" id="items-list-input" value="${enabledEntities[0].entity_id}">`}
+        <p class="section-header" style="margin-top:16px">Items</p>
+        <div class="card items-card">
+          <button type="button" id="add-item-bar" class="items-addbar">
+            <span>Add item</span>
+            <span class="items-addbar-plus">+</span>
+          </button>
+          <div id="items-preview" class="items-preview"></div>
+        </div>
+      ` : ''}
     `
 
 
@@ -1510,6 +1584,451 @@ export class PhoneUI {
         toggleList()
       })
     })
+
+    // Items list picker (multi-list only)
+    const listBtn = el.querySelector('#items-list-btn') as HTMLButtonElement | null
+    const listMenu = el.querySelector('#items-list-menu') as HTMLElement | null
+    const listLabel = el.querySelector('#items-list-btn .cs-label') as HTMLElement | null
+    const listInput = el.querySelector('#items-list-input') as HTMLInputElement | null
+    if (listBtn && listMenu && listLabel && listInput) {
+      const closeMenu = () => { listMenu.hidden = true; listBtn.classList.remove('cs-open') }
+      const openMenu = () => { listMenu.hidden = false; listBtn.classList.add('cs-open') }
+      listBtn.addEventListener('click', (e) => {
+        e.stopPropagation()
+        if (listMenu.hidden) openMenu()
+        else closeMenu()
+      })
+      listMenu.querySelectorAll<HTMLButtonElement>('.cs-option').forEach(opt => {
+        opt.addEventListener('click', (e) => {
+          e.stopPropagation()
+          const v = opt.getAttribute('data-value') || ''
+          const lbl = opt.getAttribute('data-label') || ''
+          listInput.value = v
+          listLabel.textContent = lbl
+          listMenu.querySelectorAll('.cs-option').forEach(o => o.classList.remove('cs-selected'))
+          opt.classList.add('cs-selected')
+          closeMenu()
+          this.refreshTodoItemsPreview(v)
+        })
+      })
+      document.addEventListener('click', (e) => {
+        if (!listMenu.hidden && !listBtn.contains(e.target as Node) && !listMenu.contains(e.target as Node)) closeMenu()
+      })
+    }
+
+    // Add item bar — opens modal in add mode
+    const addBar = el.querySelector('#add-item-bar') as HTMLButtonElement | null
+    if (addBar) {
+      addBar.addEventListener('click', () => {
+        const currentId = (el.querySelector('#items-list-input') as HTMLInputElement | null)?.value
+        if (currentId) this.openItemModal(currentId, null)
+      })
+    }
+
+    // Initial preview fetch for the pre-selected list
+    if (enabledEntities.length > 0) {
+      this.refreshTodoItemsPreview(enabledEntities[0].entity_id)
+    }
+  }
+
+  private formatPreviewDue(due?: string): { label: string; overdue: boolean } {
+    if (!due) return { label: '', overdue: false }
+    const d = new Date(due)
+    if (isNaN(d.getTime())) return { label: '', overdue: false }
+    const hasTime = due.includes('T')
+    const now = new Date()
+    const overdue = hasTime ? d.getTime() < now.getTime() : d < new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const target = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+    const diffDays = Math.round((target.getTime() - today.getTime()) / 86400000)
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    let label: string
+    if (diffDays === 0) label = 'Today'
+    else if (diffDays === 1) label = 'Tomorrow'
+    else if (diffDays === -1) label = 'Yesterday'
+    else if (diffDays > 0 && diffDays < 7) label = d.toLocaleDateString(undefined, { weekday: 'short' })
+    else label = `${d.getDate()} ${MONTHS[d.getMonth()]}`
+    if (hasTime) {
+      const hh = String(d.getHours()).padStart(2, '0')
+      const mm = String(d.getMinutes()).padStart(2, '0')
+      label += ` ${hh}:${mm}`
+    }
+    return { label, overdue }
+  }
+
+  private renderItemRow(item: import('./ha-client').TodoItem): string {
+    const due = this.formatPreviewDue(item.due)
+    const doneClass = item.done ? ' items-row-done' : ''
+    const dueClass = due.overdue ? ' items-due-overdue' : ''
+    const descHtml = item.description ? `<div class="items-desc">${this.escHtml(item.description)}</div>` : ''
+    const dueHtml = due.label ? `<div class="items-due${dueClass}"><span class="items-due-icon">\u25F7</span>${this.escHtml(due.label)}</div>` : ''
+    return `
+      <div class="items-row${doneClass}" data-uid="${this.escHtml(item.uid)}">
+        <button type="button" class="items-check" data-uid="${this.escHtml(item.uid)}" aria-label="Toggle done">
+          ${item.done ? '\u2713' : ''}
+        </button>
+        <div class="items-body">
+          <div class="items-title">${this.escHtml(item.summary)}</div>
+          ${descHtml}
+          ${dueHtml}
+        </div>
+      </div>
+    `
+  }
+
+  private async refreshTodoItemsPreview(entityId: string) {
+    const root = document.getElementById('items-preview')
+    if (!root || !this.ha) return
+    root.innerHTML = `<div class="items-empty">Loading items&hellip;</div>`
+    let items: import('./ha-client').TodoItem[]
+    try {
+      items = await this.ha.getTodoItems(entityId)
+    } catch {
+      if (document.getElementById('items-preview') !== root) return
+      root.innerHTML = `<div class="items-empty items-error">Could not load items</div>`
+      return
+    }
+    if (document.getElementById('items-preview') !== root) return  // tab switched mid-fetch
+    if (items.length === 0) {
+      root.innerHTML = `<div class="items-empty">No items yet</div>`
+      return
+    }
+    const pending = items.filter(i => !i.done)
+    const completed = items.filter(i => i.done)
+    const sections: string[] = []
+    if (pending.length > 0) {
+      sections.push(`<div class="items-section-label">Active</div>`)
+      sections.push(...pending.map(i => this.renderItemRow(i)))
+    }
+    if (completed.length > 0) {
+      sections.push(`<div class="items-section-label items-section-completed">Completed (${completed.length})</div>`)
+      sections.push(...completed.map(i => this.renderItemRow(i)))
+    }
+    root.innerHTML = sections.join('')
+
+    // Wire up checkbox clicks (toggle done)
+    root.querySelectorAll<HTMLButtonElement>('.items-check').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation()
+        const uid = btn.getAttribute('data-uid') || ''
+        const item = items.find(i => i.uid === uid)
+        if (!item || !this.ha) return
+        btn.disabled = true
+        try {
+          const ok = await this.ha.editTodoItem(entityId, uid, { done: !item.done })
+          if (ok) this.refreshTodoItemsPreview(entityId)
+          else btn.disabled = false
+        } catch {
+          btn.disabled = false
+        }
+      })
+    })
+
+    // Wire up row clicks (open edit modal)
+    root.querySelectorAll<HTMLElement>('.items-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const uid = row.getAttribute('data-uid') || ''
+        const item = items.find(i => i.uid === uid)
+        if (item) this.openItemModal(entityId, item)
+      })
+    })
+  }
+
+  private openItemModal(entityId: string, existing: import('./ha-client').TodoItem | null) {
+    const isEdit = existing !== null
+    const listName = (this.ha?.getEntity(entityId)?.attributes?.friendly_name as string) || entityId.split('.').pop() || entityId
+
+    const overlay = document.createElement('div')
+    overlay.className = 'item-modal-overlay'
+    overlay.innerHTML = `
+      <div class="item-modal-card" role="dialog">
+        <div class="item-modal-head">
+          <div>
+            <div class="item-modal-title">${isEdit ? 'Edit item' : 'Add item'}</div>
+            <div class="item-modal-subtitle">${this.escHtml(listName)}</div>
+          </div>
+          <button type="button" class="item-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="item-modal-body">
+          ${isEdit ? `
+            <label class="item-modal-done-row">
+              <input type="checkbox" id="im-done" ${existing!.done ? 'checked' : ''}>
+              <span>Mark as done</span>
+            </label>
+          ` : ''}
+          <label style="margin-top:${isEdit ? '16' : '0'}px">Task name<span style="color:#ff453a"> *</span></label>
+          <input id="im-name" type="text" placeholder="What needs doing?" value="${isEdit ? this.escHtml(existing!.summary) : ''}">
+          <label>Description</label>
+          <textarea id="im-desc" class="add-field" rows="3" placeholder="Optional notes">${isEdit && existing!.description ? this.escHtml(existing!.description) : ''}</textarea>
+          <label>Due</label>
+          <input id="im-due" type="text" class="add-field" placeholder="Pick a date &amp; time" readonly>
+        </div>
+        <div class="item-modal-actions">
+          ${isEdit ? `<button type="button" class="item-modal-delete">Delete</button>` : ''}
+          <div style="flex:1"></div>
+          <button type="button" class="item-modal-cancel">Cancel</button>
+          <button type="button" class="item-modal-save">${isEdit ? 'Save' : 'Add'}</button>
+        </div>
+        <p class="item-modal-status hint"></p>
+      </div>
+    `
+    document.body.appendChild(overlay)
+
+    const elName = overlay.querySelector('#im-name') as HTMLInputElement
+    const elDesc = overlay.querySelector('#im-desc') as HTMLTextAreaElement
+    const elDue = overlay.querySelector('#im-due') as HTMLInputElement
+    const elDone = overlay.querySelector('#im-done') as HTMLInputElement | null
+    const elStatus = overlay.querySelector('.item-modal-status') as HTMLElement
+    const elSave = overlay.querySelector('.item-modal-save') as HTMLButtonElement
+    const elCancel = overlay.querySelector('.item-modal-cancel') as HTMLButtonElement
+    const elClose = overlay.querySelector('.item-modal-close') as HTMLButtonElement
+    const elDelete = overlay.querySelector('.item-modal-delete') as HTMLButtonElement | null
+
+    // Due state
+    const pad2 = (n: number) => String(n).padStart(2, '0')
+    const fmtDisplay = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    const toISO = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:00`
+    let dueDate: Date | null = null
+    let dueCleared = false
+    if (isEdit && existing!.due) {
+      const parsed = new Date(existing!.due)
+      if (!isNaN(parsed.getTime())) {
+        dueDate = parsed
+        elDue.value = fmtDisplay(parsed)
+      }
+    }
+    elDue.addEventListener('click', () => {
+      this.openDatePicker(dueDate, (picked) => {
+        dueDate = picked
+        dueCleared = picked === null
+        elDue.value = picked ? fmtDisplay(picked) : ''
+      })
+    })
+
+    const close = () => overlay.remove()
+    elClose.addEventListener('click', close)
+    elCancel.addEventListener('click', close)
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+
+    const setBusy = (busy: boolean) => {
+      elSave.disabled = busy
+      if (elDelete) elDelete.disabled = busy
+    }
+
+    elSave.addEventListener('click', async () => {
+      const summary = elName.value.trim()
+      if (!summary) {
+        elName.focus()
+        elStatus.textContent = 'Task name required'
+        return
+      }
+      if (!this.ha) return
+      const description = elDesc.value.trim()
+      setBusy(true)
+      elStatus.textContent = isEdit ? 'Saving...' : 'Adding...'
+      try {
+        if (isEdit) {
+          const updates: { rename?: string; description?: string; due?: string | null; done?: boolean } = {}
+          if (summary !== existing!.summary) updates.rename = summary
+          if (description !== (existing!.description ?? '')) updates.description = description
+          if (elDone && elDone.checked !== existing!.done) updates.done = elDone.checked
+          if (dueCleared) updates.due = ''
+          else if (dueDate) {
+            const iso = toISO(dueDate)
+            if (iso !== existing!.due) updates.due = iso
+          }
+          const ok = Object.keys(updates).length === 0
+            ? true
+            : await this.ha.editTodoItem(entityId, existing!.uid, updates)
+          if (ok) {
+            close()
+            this.refreshTodoItemsPreview(entityId)
+          } else {
+            elStatus.textContent = 'Save failed'
+            setBusy(false)
+          }
+        } else {
+          const due = dueDate ? toISO(dueDate) : undefined
+          const ok = await this.ha.addTodoItem(entityId, summary, description || undefined, due)
+          if (ok) {
+            close()
+            this.refreshTodoItemsPreview(entityId)
+          } else {
+            elStatus.textContent = 'Add failed'
+            setBusy(false)
+          }
+        }
+      } catch (err) {
+        elStatus.textContent = err instanceof Error ? err.message : 'Error'
+        setBusy(false)
+      }
+    })
+
+    if (elDelete && isEdit) {
+      elDelete.addEventListener('click', async () => {
+        if (!this.ha) return
+        if (!confirm(`Delete "${existing!.summary}"?`)) return
+        setBusy(true)
+        elStatus.textContent = 'Deleting...'
+        try {
+          const ok = await this.ha.removeTodoItem(entityId, existing!.uid)
+          if (ok) {
+            close()
+            this.refreshTodoItemsPreview(entityId)
+          } else {
+            elStatus.textContent = 'Delete failed'
+            setBusy(false)
+          }
+        } catch (err) {
+          elStatus.textContent = err instanceof Error ? err.message : 'Error'
+          setBusy(false)
+        }
+      })
+    }
+
+    elName.focus()
+    if (isEdit) elName.select()
+  }
+
+  private openDatePicker(initial: Date | null, onConfirm: (d: Date | null) => void) {
+    const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
+    const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    const DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+    const WEEKDAYS = ['M','T','W','T','F','S','S']  // Monday-first
+
+    let selected: Date | null = initial ? new Date(initial) : null
+    let viewMonth = new Date(selected ?? new Date())
+    viewMonth.setDate(1)
+    viewMonth.setHours(0, 0, 0, 0)
+    let hour = selected ? selected.getHours() : new Date().getHours()
+    let minute = selected ? selected.getMinutes() : 0
+
+    const overlay = document.createElement('div')
+    overlay.className = 'dp-overlay'
+    overlay.innerHTML = `
+      <div class="dp-card" role="dialog">
+        <div class="dp-header">
+          <div class="dp-year"></div>
+          <div class="dp-title"></div>
+        </div>
+        <div class="dp-month-nav">
+          <button class="dp-prev" aria-label="Previous month">&lsaquo;</button>
+          <div class="dp-month"></div>
+          <button class="dp-next" aria-label="Next month">&rsaquo;</button>
+        </div>
+        <div class="dp-weekdays">
+          ${WEEKDAYS.map(d => `<div class="dp-wd">${d}</div>`).join('')}
+        </div>
+        <div class="dp-grid"></div>
+        <div class="dp-time-row">
+          <span class="dp-time-label">Time</span>
+          <input class="dp-hh" type="number" min="0" max="23" inputmode="numeric">
+          <span class="dp-time-sep">:</span>
+          <input class="dp-mm" type="number" min="0" max="59" inputmode="numeric">
+        </div>
+        <div class="dp-actions">
+          <button class="dp-clear">Clear</button>
+          <button class="dp-today">Today</button>
+          <div style="flex:1"></div>
+          <button class="dp-cancel">Cancel</button>
+          <button class="dp-ok">OK</button>
+        </div>
+      </div>
+    `
+    document.body.appendChild(overlay)
+
+    const elHeader = overlay.querySelector('.dp-title') as HTMLElement
+    const elYear = overlay.querySelector('.dp-year') as HTMLElement
+    const elMonth = overlay.querySelector('.dp-month') as HTMLElement
+    const elGrid = overlay.querySelector('.dp-grid') as HTMLElement
+    const elHH = overlay.querySelector('.dp-hh') as HTMLInputElement
+    const elMM = overlay.querySelector('.dp-mm') as HTMLInputElement
+    const pad = (n: number) => String(n).padStart(2, '0')
+
+    const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+
+    const render = () => {
+      elYear.textContent = String(selected ? selected.getFullYear() : viewMonth.getFullYear())
+      if (selected) {
+        elHeader.textContent = `${DAYS_SHORT[selected.getDay()]} ${selected.getDate()} ${MONTHS_SHORT[selected.getMonth()]}`
+      } else {
+        elHeader.textContent = 'Select date'
+      }
+      elMonth.textContent = `${MONTHS[viewMonth.getMonth()]} ${viewMonth.getFullYear()}`
+      elHH.value = pad(hour)
+      elMM.value = pad(minute)
+
+      const firstDay = new Date(viewMonth)
+      const daysInMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 0).getDate()
+      // JS: Sunday=0, we want Monday-first; leading = (getDay() + 6) % 7
+      const leading = (firstDay.getDay() + 6) % 7
+      const today = new Date()
+
+      const cells: string[] = []
+      for (let i = 0; i < leading; i++) cells.push(`<div class="dp-cell dp-empty"></div>`)
+      for (let d = 1; d <= daysInMonth; d++) {
+        const date = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d)
+        const isSelected = selected && sameDay(date, selected)
+        const isToday = sameDay(date, today)
+        const classes = ['dp-cell']
+        if (isSelected) classes.push('dp-selected')
+        else if (isToday) classes.push('dp-today-cell')
+        cells.push(`<button class="${classes.join(' ')}" data-d="${d}">${d}</button>`)
+      }
+      elGrid.innerHTML = cells.join('')
+
+      elGrid.querySelectorAll<HTMLButtonElement>('button.dp-cell').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const d = parseInt(btn.getAttribute('data-d') || '0', 10)
+          selected = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), d, hour, minute)
+          render()
+        })
+      })
+    }
+
+    ;(overlay.querySelector('.dp-prev') as HTMLButtonElement).addEventListener('click', () => {
+      viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1)
+      render()
+    })
+    ;(overlay.querySelector('.dp-next') as HTMLButtonElement).addEventListener('click', () => {
+      viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1)
+      render()
+    })
+    ;(overlay.querySelector('.dp-today') as HTMLButtonElement).addEventListener('click', () => {
+      const now = new Date()
+      selected = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute)
+      viewMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+      render()
+    })
+    ;(overlay.querySelector('.dp-clear') as HTMLButtonElement).addEventListener('click', () => {
+      selected = null
+      render()
+    })
+    ;(overlay.querySelector('.dp-cancel') as HTMLButtonElement).addEventListener('click', () => {
+      overlay.remove()
+    })
+    ;(overlay.querySelector('.dp-ok') as HTMLButtonElement).addEventListener('click', () => {
+      if (selected) {
+        selected.setHours(hour, minute, 0, 0)
+      }
+      onConfirm(selected)
+      overlay.remove()
+    })
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove() })
+
+    const clampTime = () => {
+      const h = Math.max(0, Math.min(23, parseInt(elHH.value || '0', 10) || 0))
+      const m = Math.max(0, Math.min(59, parseInt(elMM.value || '0', 10) || 0))
+      hour = h
+      minute = m
+      elHH.value = pad(h)
+      elMM.value = pad(m)
+      if (selected) selected.setHours(h, m, 0, 0)
+    }
+    elHH.addEventListener('change', clampTime)
+    elMM.addEventListener('change', clampTime)
+
+    render()
   }
 
   private applyTheme() {

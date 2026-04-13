@@ -1,8 +1,8 @@
 {
   "package_id": "com.micky.homeassistant",
   "edition": "202601",
-  "name": "HA Glance & Control",
-  "version": "1.0.3",
+  "name": "HA",
+  "version": "1.0.6",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.9",
   "entrypoint": "index.html",
