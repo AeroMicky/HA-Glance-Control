@@ -109,6 +109,12 @@ npm run pack      # build + package as .ehpk for Even Hub
 
 ---
 
+## Release Notes
+
+See [CHANGELOG.md](CHANGELOG.md) for a full version history.
+
+---
+
 ## Contributing
 
 Issues and PRs welcome. If you run into a bug or want support for a new domain or feature, open an issue.
