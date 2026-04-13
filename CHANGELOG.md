@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.6 (2026-04-12)
+## 1.0.6 (2026-04-13)
 
 ### Security
 - Fix XSS vulnerability in connection error display
@@ -16,6 +16,9 @@
 - Build script outputs `ha-{version}.ehpk` naming convention
 
 ### Fixed
+- UI freeze when controlling slow devices (garage doors, covers, blinds) — added 10s timeout to all HA commands
+- Pending commands now rejected on WebSocket disconnect instead of hanging forever
+- Replace unsupported unicode symbols with plain text on confirm/result screens
 - 4 TypeScript strict mode errors (nullable content, unreachable comparison, undefined dashboard access)
 
 ### Removed
