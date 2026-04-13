@@ -1138,7 +1138,7 @@ export class UI {
       actions.push(`Read description ${ARROW_R}`)
       actionKinds.push('read')
     }
-    actions.push('\u2715 Delete item')
+    actions.push('Delete item')
     actionKinds.push('delete')
     this.todoDetailActions = actionKinds
     const infoText = infoLines.join('\n').substring(0, 900)
@@ -1334,8 +1334,8 @@ export class UI {
           itemWidth: UI.ACTION_BOX_W - 16,
           isItemSelectBorderEn: 1,
           itemName: [
-            '\u2717 Cancel',
-            '\u2715 Delete',
+            'Cancel',
+            'Delete',
           ],
         }),
       })],
@@ -1422,8 +1422,8 @@ export class UI {
           itemWidth: UI.ACTION_BOX_W - 16,
           isItemSelectBorderEn: 1,
           itemName: [
-            '\u2717  Cancel',
-            `\u2713  ${action}`,
+            'Cancel',
+            `${action}`,
             favLabel,
           ],
         }),
@@ -1458,7 +1458,7 @@ export class UI {
     const { entityId, success, action } = this.screen
     const name = this.truncate(this.entityName(entityId), 26)
     const truncAction = this.truncate(action, 26)
-    const icon = success ? '\u2713' : '\u2717'
+    const icon = success ? 'OK' : 'FAIL'
 
     await this.rebuildPage({
       containerTotalNum: 2,

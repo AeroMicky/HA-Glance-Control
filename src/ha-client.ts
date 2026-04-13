@@ -62,6 +62,7 @@ export class HAClient {
       this.ws.onclose = (event) => {
         console.log('[HA] WebSocket closed:', event.code, event.reason)
         this.ws = null
+        this.rejectPending()
         if (!this.deliberateDisconnect) {
           this.connectionCallbacks.forEach(cb => cb(false))
           this.scheduleReconnect()
@@ -149,14 +150,26 @@ export class HAClient {
     }
   }
 
+  private rejectPending() {
+    for (const cb of this.pending.values()) cb(null)
+    this.pending.clear()
+  }
+
   private send(msg: Record<string, unknown>) {
     this.ws?.send(JSON.stringify(msg))
   }
 
-  private sendCommand(msg: Record<string, unknown>): Promise<unknown> {
+  private sendCommand(msg: Record<string, unknown>, timeoutMs = 10000): Promise<unknown> {
     const id = this.msgId++
-    return new Promise((resolve) => {
-      this.pending.set(id, resolve)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`HA command timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      this.pending.set(id, (result: unknown) => {
+        clearTimeout(timer)
+        resolve(result)
+      })
       this.send({ ...msg, id })
     })
   }
