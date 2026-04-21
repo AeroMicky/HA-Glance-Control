@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.7 (2026-04-21)
+
+### Added
+- Home tab on phone UI — status pill (Active / Reconnecting / Connection error / Needs setup / Disconnected), HA host and inventory overview (sensors, favourites, rooms, lists, clock mode), Get Started / Open Settings CTAs
+- `HAClient.isConnected()` helper
+- Optional per-call timeout on `HAClient.callService` (default 5s)
+
+### Changed
+- Home is now the default landing tab instead of Connection
+- Disconnect callback fires on every disconnect (previously skipped deliberate ones) so the HUD `[!]` indicator is consistent
+- HA command failures reject the promise with a real error message instead of resolving `null` — pending commands on disconnect now reject with "HA connection lost before response"
+
+### Developer
+- BroadcastChannel (`ha-plugin-control`) between simulator and phone browser for cross-context prototype testing (no production effect)
+
 ## 1.0.6 (2026-04-13)
 
 ### Security

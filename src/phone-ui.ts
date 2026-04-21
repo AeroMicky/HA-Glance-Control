@@ -25,22 +25,28 @@ const DOMAIN_ICONS: Record<string, string> = {
   lock: '\u{1F512}',
 }
 
-type Tab = 'connection' | 'favorites' | 'rooms' | 'sensors' | 'todoLists'
+type Tab = 'home' | 'connection' | 'favorites' | 'rooms' | 'sensors' | 'todoLists'
 
 export class PhoneUI {
   private ha: HAClient | null = null
+  private haConnected = false
+  private manuallyDisconnected = false
   private root: HTMLElement
-  private tab: Tab = 'connection'
+  private tab: Tab = 'home'
   private onConnect: (ha: HAClient) => void
   private connectError: string | null = null
+  private control: BroadcastChannel | null
 
-  constructor(root: HTMLElement, onConnect: (ha: HAClient) => void) {
+  constructor(
+    root: HTMLElement,
+    onConnect: (ha: HAClient) => void,
+    control: BroadcastChannel | null = null,
+  ) {
     this.root = root
     this.onConnect = onConnect
+    this.control = control
     this.applyTheme()
     loadConfig().then(() => {
-      const cfg = getConfig()
-      if (cfg.ha_url && cfg.ha_token) this.tab = 'todoLists'
       this.render()
     })
   }
@@ -52,7 +58,7 @@ export class PhoneUI {
 
   render() {
     const config = getConfig()
-    const connected = this.ha !== null
+    const connected = this.ha !== null && this.haConnected
 
     this.root.innerHTML = `
       <div class="app">
@@ -61,6 +67,7 @@ export class PhoneUI {
           <span class="status ${connected ? 'on' : 'off'}">${connected ? 'Connected' : 'Disconnected'}</span>
         </header>
         <nav>
+          ${this.tabBtn('home', 'Home')}
           ${this.tabBtn('todoLists', 'Lists')}
           ${this.tabBtn('favorites', 'Favs')}
           ${this.tabBtn('rooms', 'Rooms')}
@@ -80,6 +87,7 @@ export class PhoneUI {
 
     const content = this.root.querySelector('#tab-content') as HTMLElement
     switch (this.tab) {
+      case 'home': this.renderHome(content, config); break
       case 'connection': this.renderConnection(content, config); break
       case 'favorites': this.renderFavorites(content, config); break
       case 'rooms': this.renderRooms(content, config); break
@@ -88,8 +96,139 @@ export class PhoneUI {
     }
   }
 
+  private renderHome(el: HTMLElement, config: AppConfig) {
+    const connected = this.ha !== null && this.haConnected
+    const hasCredentials = !!(config.ha_url && config.ha_token)
+    const sensorCount = (config.headerSensors?.length ?? 0) + (config.footerSensors?.length ?? 0)
+    const favCount = config.favorites?.length ?? 0
+    const roomCount = Object.keys(config.rooms ?? {}).length
+    const listCount = config.enabledTodoLists?.length ?? 0
+
+    // Derive status
+    let statusLabel: string
+    let statusClass: 'ok' | 'warn' | 'err'
+    let statusSub: string
+    if (!hasCredentials) {
+      statusLabel = 'Needs setup'
+      statusClass = 'warn'
+      statusSub = 'Add your Home Assistant details to get started.'
+    } else if (this.manuallyDisconnected) {
+      statusLabel = 'Disconnected'
+      statusClass = 'warn'
+      statusSub = 'You disconnected manually. Tap Connect in Settings to resume.'
+    } else if (!connected) {
+      statusLabel = this.connectError ? 'Connection error' : 'Reconnecting…'
+      statusClass = 'err'
+      statusSub = this.connectError ?? 'Trying to reach Home Assistant.'
+    } else {
+      statusLabel = 'Active'
+      statusClass = 'ok'
+      statusSub = 'Your glasses are reading Home Assistant.'
+    }
+
+    // Masked host (no protocol, no /api/websocket, no token)
+    const maskedHost = this.maskHost(config.ha_url)
+
+    const clockMode = config.clock?.show === false
+      ? 'off'
+      : (config.clock?.format === '12h' ? '12-hour' : '24-hour')
+
+    const setupCta = !hasCredentials
+      ? `<button class="home-cta primary" id="home-go-setup">Get started</button>`
+      : `<button class="home-cta" id="home-go-setup">Open settings</button>`
+
+    const infoRows = hasCredentials ? `
+      <div class="card home-info">
+        <div class="home-info-row">
+          <span class="home-info-label">Home Assistant</span>
+          <span class="home-info-value">${this.escapeHtml(maskedHost || '—')}</span>
+        </div>
+        <div class="home-info-row">
+          <span class="home-info-label">Sensors</span>
+          <span class="home-info-value">${sensorCount}</span>
+        </div>
+        <div class="home-info-row">
+          <span class="home-info-label">Favourites</span>
+          <span class="home-info-value">${favCount}</span>
+        </div>
+        <div class="home-info-row">
+          <span class="home-info-label">Rooms</span>
+          <span class="home-info-value">${roomCount}</span>
+        </div>
+        <div class="home-info-row">
+          <span class="home-info-label">Lists</span>
+          <span class="home-info-value">${listCount}</span>
+        </div>
+        <div class="home-info-row">
+          <span class="home-info-label">Clock</span>
+          <span class="home-info-value">${clockMode}</span>
+        </div>
+      </div>
+    ` : ''
+
+    el.innerHTML = `
+      <section class="home-hero">
+        <div class="home-glyph" aria-hidden="true">
+          <svg viewBox="0 0 120 48" width="120" height="48">
+            <circle cx="28" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="2.5"/>
+            <circle cx="92" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="2.5"/>
+            <path d="M44 24 h32" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M12 22 l-6 -6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M108 22 l6 -6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2 class="home-title">HA Glance &amp; Control</h2>
+        <div class="home-status-pill ${statusClass}">
+          <span class="home-status-dot"></span>${this.escapeHtml(statusLabel)}
+        </div>
+        <p class="home-subtitle">${this.escapeHtml(statusSub)}</p>
+      </section>
+
+      ${infoRows}
+
+      <section class="home-actions">
+        ${setupCta}
+      </section>
+
+      <p class="home-footnote">Keep Even Hub open on your phone for the glasses plugin to stay connected.</p>
+    `
+
+    const cta = el.querySelector('#home-go-setup')
+    cta?.addEventListener('click', () => {
+      this.tab = 'connection'
+      this.render()
+    })
+  }
+
+  private maskHost(url: string): string {
+    if (!url) return ''
+    return url
+      .replace(/^wss?:\/\//i, '')
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/api\/websocket\/?$/i, '')
+      .replace(/\/+$/, '')
+  }
+
+  private escapeHtml(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
   setHA(ha: HAClient) {
     this.ha = ha
+    this.haConnected = true
+    this.manuallyDisconnected = false
+    this.connectError = null
+    this.render()
+  }
+
+  setConnected(connected: boolean) {
+    this.haConnected = connected
+    if (connected) this.connectError = null
     this.render()
   }
 
@@ -99,7 +238,7 @@ export class PhoneUI {
   }
 
   private renderConnection(el: HTMLElement, config: AppConfig) {
-    const connected = this.ha !== null
+    const connected = this.ha !== null && this.haConnected
     const hasCredentials = config.ha_url && config.ha_token
     el.innerHTML = `
       <section>
@@ -172,7 +311,7 @@ export class PhoneUI {
         </div>
 
         <label>Auto Standby</label>
-        <p class="hint" style="margin-top:0">Return glasses to standby after inactivity. Prevents accidental taps.</p>
+        <p class="hint" style="margin-top:0">Return glasses to standby after inactivity. Prevents accidental taps. Timer resets on a click or double-click &mdash; the ring's scroll gesture is not reported to the app, so scrolling does not count as activity.</p>
         <div class="card">
           <div class="entity-list" id="auto-standby-options">
             ${([
@@ -244,7 +383,10 @@ export class PhoneUI {
           <p class="hint">
             Profile &rarr; Security &rarr; Long-Lived Access Tokens &rarr; Create Token
           </p>
-          <button id="connect-btn" class="primary">${connected ? 'Reconnect' : 'Connect'}</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button id="connect-btn" class="primary">${connected ? 'Reconnect' : 'Connect'}</button>
+            ${this.ha ? `<button id="disconnect-btn">Disconnect</button>` : ''}
+          </div>
           <p id="connect-status">${this.connectError ? `Failed: ${this.escHtml(this.connectError)}` : ''}</p>
         </div>
       </section>
@@ -264,6 +406,7 @@ export class PhoneUI {
     })
 
     el.querySelector('#connect-btn')?.addEventListener('click', () => this.handleConnect(el))
+    el.querySelector('#disconnect-btn')?.addEventListener('click', () => this.handleDisconnect(el))
 
     el.querySelector('#dark-mode-toggle')?.addEventListener('click', () => {
       this.toggleDarkMode()
@@ -383,12 +526,18 @@ export class PhoneUI {
     saveConfig({ ha_url: url, ha_token: token })
 
     try {
+      // Tear down any existing client so we don't leak a dangling socket on Reconnect.
+      if (this.ha) {
+        try { this.ha.disconnect() } catch { /* ignore */ }
+      }
       const ha = new HAClient(url, token)
       await ha.connect()
-      this.ha = ha
+      this.setHA(ha)
       this.onConnect(ha)
       status.textContent = 'Connected!'
-      this.render()
+      // Tell sibling contexts (sim) their stale HAClient is no longer valid —
+      // they'll reload and re-init from current config. No-op in prod.
+      try { this.control?.postMessage('reconnect') } catch { /* ignore */ }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       status.innerHTML = `Failed: ${this.escHtml(msg)}<br><br><small>Common fixes:<br>
@@ -396,6 +545,22 @@ export class PhoneUI {
         - URL must end with /api/websocket<br>
         - Check browser console (F12) for details</small>`
     }
+  }
+
+  private handleDisconnect(el: HTMLElement) {
+    const status = el.querySelector('#connect-status') as HTMLElement | null
+    if (!this.ha) return
+    try { this.ha.disconnect() } catch { /* ignore */ }
+    this.ha = null
+    this.haConnected = false
+    this.manuallyDisconnected = true
+    this.connectError = null
+    // Cross-tab signal for prototype testing (phone browser + simulator in
+    // separate contexts). In prod a single HAClient is shared, so this is a
+    // no-op. Using the shared channel means we don't loop back to ourselves.
+    try { this.control?.postMessage('disconnect') } catch { /* ignore */ }
+    if (status) status.textContent = 'Disconnected.'
+    this.render()
   }
 
   private renderFavorites(el: HTMLElement, config: AppConfig) {
@@ -424,7 +589,7 @@ export class PhoneUI {
               const state = entity?.state ?? 'unknown'
               const total = config.favorites.length
               return `
-              <div class="entity-row" data-id="${f.entity_id}" data-idx="${i}">
+              <div class="entity-row removable-entity fav-selected" data-id="${f.entity_id}" data-idx="${i}" data-current="${this.escHtml(displayName)}">
                 <div class="drag-handle" data-drag-idx="${i}" data-drag-list="fav"><span></span><span></span><span></span></div>
                 ${this.domainIconHtml(domain)}
                 <div class="row-text">
@@ -432,7 +597,7 @@ export class PhoneUI {
                   <span class="subtitle">${this.formatState(state, entity)}</span>
                 </div>
                 <div class="row-right">
-                  <span class="chevron">&#x203A;</span>
+                  <span class="remove-btn" data-remove-fav="${f.entity_id}" aria-label="Remove">&minus;</span>
                 </div>
               </div>
             `}).join('')}
@@ -446,14 +611,14 @@ export class PhoneUI {
           ${entities.filter(e => !favIds.has(e.entity_id)).map(e => {
             const domain = e.entity_id.split('.')[0]
             return `
-            <div class="entity-row" data-id="${e.entity_id}">
+            <div class="entity-row add-row fav-available" data-id="${e.entity_id}">
               ${this.domainIconHtml(domain)}
               <div class="row-text">
                 <span class="name">${this.escHtml(this.friendlyName(e.entity_id))}</span>
-                <span class="subtitle">${e.entity_id}</span>
+                <span class="subtitle">${e.entity_id} &middot; ${this.formatState(e.state, e)}</span>
               </div>
               <div class="row-right">
-                <span class="detail">${this.formatState(e.state, e)}</span>
+                <span class="add-btn" aria-label="Add"></span>
               </div>
             </div>
           `}).join('')}
@@ -471,12 +636,18 @@ export class PhoneUI {
 
     el.querySelectorAll('#available-list .entity-row').forEach(row => {
       row.addEventListener('click', () => {
-        const id = row.getAttribute('data-id')!
+        if (row.classList.contains('is-adding')) return
         const current = getConfig().favorites
-        if (current.length < 8) {
-          saveConfig({ favorites: [...current, { entity_id: id, label: this.friendlyName(id) }] })
-        }
-        this.render()
+        if (current.length >= 8) return  // limit reached — silent no-op (matches existing behaviour)
+        row.classList.add('is-adding')
+        const id = row.getAttribute('data-id')!
+        window.setTimeout(() => {
+          const now = getConfig().favorites
+          if (now.length < 8) {
+            saveConfig({ favorites: [...now, { entity_id: id, label: this.friendlyName(id) }] })
+          }
+          this.render()
+        }, 180)
       })
     })
 
@@ -492,8 +663,21 @@ export class PhoneUI {
     el.querySelectorAll('#fav-list .entity-row').forEach(row => {
       row.addEventListener('click', (e) => {
         if ((e.target as HTMLElement).closest('.drag-handle')) return
+        const target = e.target as HTMLElement
         const id = row.getAttribute('data-id')!
-        const displayName = config.customNames[id] || config.favorites.find(f => f.entity_id === id)?.label || id
+        const displayName = row.getAttribute('data-current') ?? config.customNames[id] ?? config.favorites.find(f => f.entity_id === id)?.label ?? id
+
+        if (target.closest('.remove-btn')) {
+          e.stopPropagation()
+          if (row.classList.contains('is-removing')) return
+          row.classList.add('is-removing')
+          window.setTimeout(() => {
+            saveConfig({ favorites: getConfig().favorites.filter(f => f.entity_id !== id) })
+            this.render()
+          }, 180)
+          return
+        }
+
         this.showItemActions(id, displayName, 'favorite')
       })
     })
@@ -559,7 +743,7 @@ export class PhoneUI {
                     const state = entity?.state ?? 'unknown'
                     const total = sortedIncluded.length
                     return `
-                    <div class="entity-row selected-room-entity" data-room="${this.escHtml(room)}" data-id="${id}" data-idx="${i}">
+                    <div class="entity-row selected-room-entity removable-entity" data-room="${this.escHtml(room)}" data-id="${id}" data-idx="${i}" data-current="${this.escHtml(displayName)}">
                       ${sortMode === 'custom' ? `
                         <div class="drag-handle" data-drag-idx="${i}" data-drag-list="room-${this.escHtml(room)}"><span></span><span></span><span></span></div>
                       ` : ''}
@@ -569,7 +753,7 @@ export class PhoneUI {
                         <span class="subtitle">${this.formatState(state, entity)}</span>
                       </div>
                       <div class="row-right">
-                        <span class="chevron" data-rename-room="${id}" data-current="${this.escHtml(displayName)}">&#x203A;</span>
+                        <span class="remove-btn" data-remove-room="${id}" aria-label="Remove">&minus;</span>
                       </div>
                     </div>
                   `}).join('')}
@@ -584,14 +768,14 @@ export class PhoneUI {
                   const displayName = this.friendlyName(id)
                   const state = entity?.state ?? 'unknown'
                   return `
-                  <div class="entity-row" data-room="${this.escHtml(room)}" data-id="${id}" data-selected="false">
+                  <div class="entity-row add-row" data-room="${this.escHtml(room)}" data-id="${id}" data-selected="false">
                     ${this.domainIconHtml(domain)}
                     <div class="row-text">
                       <span class="name">${this.escHtml(displayName)}</span>
                       <span class="subtitle">${this.formatState(state, entity)}</span>
                     </div>
                     <div class="row-right">
-                      <span class="checkbox">&#10003;</span>
+                      <span class="add-btn" aria-label="Add">+</span>
                     </div>
                   </div>
                 `}).join('')}
@@ -650,31 +834,48 @@ export class PhoneUI {
       })
     }
 
-    // Selected room entities: tap for actions (rename/remove)
+    // Selected room entities: minus removes directly; row body opens actions menu (rename/remove).
     el.querySelectorAll('.selected-room-entity').forEach(row => {
       row.addEventListener('click', (e) => {
         if ((e.target as HTMLElement).closest('.drag-handle')) return
         const target = e.target as HTMLElement
-        if (target.hasAttribute('data-rename-room')) {
+        const room = row.getAttribute('data-room')!
+        const id = row.getAttribute('data-id')!
+        const displayName = row.getAttribute('data-current') ?? id
+
+        if (target.closest('.remove-btn')) {
           e.stopPropagation()
-          const id = target.getAttribute('data-rename-room')!
-          const displayName = target.getAttribute('data-current')!
-          const room = row.getAttribute('data-room')!
-          this.showRoomItemActions(id, displayName, room)
+          if (row.classList.contains('is-removing')) return
+          row.classList.add('is-removing')
+          window.setTimeout(() => {
+            const rooms = { ...getConfig().rooms }
+            const current = rooms[room] ?? []
+            rooms[room] = current.filter(x => x !== id)
+            if (rooms[room].length === 0) delete rooms[room]
+            saveConfig({ rooms })
+            this.render()
+          }, 180)
           return
         }
+
+        // Row body tap → actions menu (Rename / Remove)
+        this.showRoomItemActions(id, displayName, room)
       })
     })
 
-    // Unselected entities: click to add
+    // Unselected entities: click to add (brief confirmation animation, then re-render)
     el.querySelectorAll('.entity-row[data-room][data-selected="false"]').forEach(row => {
       row.addEventListener('click', () => {
+        if (row.classList.contains('is-adding')) return
+        row.classList.add('is-adding')
         const room = row.getAttribute('data-room')!
         const id = row.getAttribute('data-id')!
-        const rooms = { ...getConfig().rooms }
-        rooms[room] = [...(rooms[room] ?? []), id]
-        saveConfig({ rooms })
-        this.render()
+        window.setTimeout(() => {
+          const rooms = { ...getConfig().rooms }
+          rooms[room] = [...(rooms[room] ?? []), id]
+          saveConfig({ rooms })
+          this.render()
+        }, 180)
       })
     })
 
@@ -742,7 +943,7 @@ export class PhoneUI {
       <p class="section-header">Available Sensors</p>
       <input class="search-input" id="sensor-search" type="text" placeholder="Search entities...">
       <div class="card">
-        <div id="sensor-list" class="entity-list" style="max-height:300px;overflow-y:auto">
+        <div id="sensor-list" class="entity-list" style="max-height:300px;overflow-y:auto;overflow-x:hidden">
           ${sensors.filter(e => !allSlotIds.has(e.entity_id)).map(e => {
             const domain = e.entity_id.split('.')[0]
             const unit = this.guessUnit(e)

@@ -18,7 +18,7 @@ export interface TodoItem {
 export class HAClient {
   private ws: WebSocket | null = null
   private msgId = 1
-  private pending = new Map<number, (result: unknown) => void>()
+  private pending = new Map<number, { resolve: (result: unknown) => void; reject: (err: Error) => void }>()
   private stateCallbacks: HAStateChangedCallback[] = []
   private connectionCallbacks: ConnectionCallback[] = []
   private entities = new Map<string, HAEntity>()
@@ -63,8 +63,11 @@ export class HAClient {
         console.log('[HA] WebSocket closed:', event.code, event.reason)
         this.ws = null
         this.rejectPending()
+        // Notify subscribers regardless of reason — UI needs to reflect that the
+        // socket is gone (e.g. HUD `[!]` indicator, phone status pill). Only skip
+        // the auto-reconnect schedule when the disconnect was deliberate.
+        this.connectionCallbacks.forEach(cb => cb(false))
         if (!this.deliberateDisconnect) {
-          this.connectionCallbacks.forEach(cb => cb(false))
           this.scheduleReconnect()
         }
       }
@@ -123,7 +126,8 @@ export class HAClient {
         const cb = this.pending.get(id)
         if (cb) {
           this.pending.delete(id)
-          cb(success ? msg.result : null)
+          if (success) cb.resolve(msg.result)
+          else cb.reject(new Error(`HA command failed: ${(msg.error as { message?: string } | undefined)?.message ?? 'unknown'}`))
         }
         break
       }
@@ -151,7 +155,8 @@ export class HAClient {
   }
 
   private rejectPending() {
-    for (const cb of this.pending.values()) cb(null)
+    const err = new Error('HA connection lost before response')
+    for (const cb of this.pending.values()) cb.reject(err)
     this.pending.clear()
   }
 
@@ -166,9 +171,9 @@ export class HAClient {
         this.pending.delete(id)
         reject(new Error(`HA command timed out after ${timeoutMs}ms`))
       }, timeoutMs)
-      this.pending.set(id, (result: unknown) => {
-        clearTimeout(timer)
-        resolve(result)
+      this.pending.set(id, {
+        resolve: (result: unknown) => { clearTimeout(timer); resolve(result) },
+        reject: (err: Error) => { clearTimeout(timer); reject(err) },
       })
       this.send({ ...msg, id })
     })
@@ -247,7 +252,8 @@ export class HAClient {
     domain: string,
     service: string,
     entityId: string,
-    serviceData?: Record<string, unknown>
+    serviceData?: Record<string, unknown>,
+    timeoutMs = 5000
   ): Promise<boolean> {
     try {
       await this.sendCommand({
@@ -255,11 +261,15 @@ export class HAClient {
         domain,
         service,
         service_data: { entity_id: entityId, ...serviceData },
-      })
+      }, timeoutMs)
       return true
     } catch {
       return false
     }
+  }
+
+  isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN
   }
 
   async toggle(entityId: string): Promise<boolean> {

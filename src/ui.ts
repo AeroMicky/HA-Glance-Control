@@ -25,7 +25,7 @@ const STATUS_X = LIST_W + 8
 const STATUS_W = W - STATUS_X
 
 // Separators
-const DOT = '  /  '             // separator between sensor values
+const DOT = '  |  '             // separator between sensor values
 const ARROW_R = '\u203A'        // › right arrow
 const BAR_FULL = '\u2501'       // ━ thick bar segment
 const BAR_EMPTY = '\u2500'      // ─ thin bar segment
@@ -156,10 +156,12 @@ export class UI {
       const pages = this.footerPages()
       if (pages.length > 1) {
         this.footerPage = (this.footerPage + 1) % pages.length
+        const footerContent = this.footerContent()
+        this.lastFooterContent = footerContent
         this.bridge.textContainerUpgrade(new TextContainerUpgrade({
           containerID: 3,
           containerName: 'footer',
-          content: this.footerContent(),
+          content: footerContent,
         })).catch(console.error)
       }
     }, ms)
@@ -174,10 +176,12 @@ export class UI {
       const pages = this.headerSensorPages(title)
       if (pages.length > 1) {
         this.headerPage = (this.headerPage + 1) % pages.length
+        const headerContent = this.makeHeaderText(title).content ?? ''
+        this.lastHeaderContent = headerContent
         this.bridge.textContainerUpgrade(new TextContainerUpgrade({
           containerID: 1,
           containerName: 'header',
-          content: this.makeHeaderText(title).content,
+          content: headerContent,
         })).catch(console.error)
       }
     }, ms)
@@ -186,8 +190,13 @@ export class UI {
   async start() {
     this.bridge.onEvenHubEvent((event) => {
       const sysType = event.sysEvent?.eventType
+      // Treat any non-IMU event as user activity — the ring sometimes emits
+      // scroll/touch shapes we don't explicitly recognise, and dropping them
+      // silently would let the idle timer expire mid-scroll.
+      const isImu = sysType === OsEventTypeList.IMU_DATA_REPORT
+      if (!isImu) this.restartIdleTimer()
+
       if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT || (sysType as number) === 4) {
-        this.restartIdleTimer()
         this.render().catch(console.error)
         return
       }
@@ -318,16 +327,19 @@ export class UI {
     const truncTitle = title.length > 15 ? title.substring(0, 14) + '\u2026' : title
     content += truncTitle
 
-    // Add header sensors — paginated or scrolling
-    if (getConfig().sensorScrollMode === 'scroll') {
-      const scrolled = this.headerScrollContent(title)
-      if (scrolled) content += DOT + scrolled
-    } else {
-      const pages = this.headerSensorPages(title)
-      if (pages.length > 0) {
-        this.headerPage = this.headerPage % pages.length
-        for (const part of pages[this.headerPage]) {
-          content += DOT + part
+    // Add header sensors — paginated or scrolling. Skip entirely when
+    // disconnected: sensor values are stale and animating them looks jumpy.
+    if (this.connected) {
+      if (getConfig().sensorScrollMode === 'scroll') {
+        const scrolled = this.headerScrollContent(title)
+        if (scrolled) content += DOT + scrolled
+      } else {
+        const pages = this.headerSensorPages(title)
+        if (pages.length > 0) {
+          this.headerPage = this.headerPage % pages.length
+          for (const part of pages[this.headerPage]) {
+            content += DOT + part
+          }
         }
       }
     }
@@ -722,11 +734,15 @@ export class UI {
   private async updateLivePanels() {
     if (!this.startupRendered || this.rendering) return
     if (this.standbyMode) {
-      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
-        containerID: 1,
-        containerName: 'header',
-        content: this.makeHeaderText('HA').content,
-      }))
+      const headerContent = this.makeHeaderText('HA').content ?? ''
+      if (headerContent !== this.lastHeaderContent) {
+        this.lastHeaderContent = headerContent
+        await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: 1,
+          containerName: 'header',
+          content: headerContent,
+        }))
+      }
       return
     }
     if (!this.isChromeScreen()) return
@@ -739,23 +755,32 @@ export class UI {
       content: this.formatStatusText(),
     }))
 
-    // Update header text
+    // Update header text — dedupe against lastHeaderContent to avoid
+    // visible flicker from unrelated HA state_changed events.
     const headerTitle = this.getHeaderTitle()
     if (headerTitle) {
-      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
-        containerID: 1,
-        containerName: 'header',
-        content: this.makeHeaderText(headerTitle).content,
-      }))
+      const headerContent = this.makeHeaderText(headerTitle).content ?? ''
+      if (headerContent !== this.lastHeaderContent) {
+        this.lastHeaderContent = headerContent
+        await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: 1,
+          containerName: 'header',
+          content: headerContent,
+        }))
+      }
     }
 
     // Update footer text
     if (screen.type === 'home' || screen.type === 'favorites' || screen.type === 'rooms' || screen.type === 'room' || screen.type === 'submenu') {
-      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
-        containerID: 3,
-        containerName: 'footer',
-        content: this.footerContent(),
-      }))
+      const footerContent = this.footerContent()
+      if (footerContent !== this.lastFooterContent) {
+        this.lastFooterContent = footerContent
+        await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+          containerID: 3,
+          containerName: 'footer',
+          content: footerContent,
+        }))
+      }
     }
   }
 
@@ -1703,12 +1728,20 @@ export class UI {
   private async confirmExecute() {
     if (this.screen.type !== 'confirm') return
     const { entityId, action, serviceCall } = this.screen
-    const success = await this.ha.callServiceWithData(
-      serviceCall.domain,
-      serviceCall.service,
-      serviceCall.entityId,
-      serviceCall.serviceData
-    )
+
+    // Fail fast if we know we're offline — avoids a multi-second hang on
+    // a half-open socket (e.g. WiFi→cellular handover).
+    let success: boolean
+    if (!this.connected || !this.ha.isConnected()) {
+      success = false
+    } else {
+      success = await this.ha.callServiceWithData(
+        serviceCall.domain,
+        serviceCall.service,
+        serviceCall.entityId,
+        serviceCall.serviceData
+      )
+    }
     if (success) this.addToRecent(entityId)
     this.screenStack.pop() // remove confirm
     this.push({ type: 'result', entityId, success, action })
