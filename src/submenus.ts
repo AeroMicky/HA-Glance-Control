@@ -182,6 +182,11 @@ export function defaultServiceCall(
         action: 'Run',
         serviceCall: { domain, service: 'turn_on', entityId },
       }
+    case 'automation':
+      return {
+        action: 'Trigger',
+        serviceCall: { domain: 'automation', service: 'trigger', entityId },
+      }
     default:
       return {
         action: state === 'on' ? 'Turn OFF' : 'Turn ON',

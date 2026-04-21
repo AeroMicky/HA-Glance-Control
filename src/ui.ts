@@ -501,7 +501,7 @@ export class UI {
           domainCounts[domain].total++
           if (isActive(state)) domainCounts[domain].on++
         }
-        const labels: Record<string, string> = { light: 'Lights', switch: 'Switches', fan: 'Fans', cover: 'Covers', lock: 'Locks', climate: 'Climate', scene: 'Scenes', script: 'Scripts', input_boolean: 'Inputs' }
+        const labels: Record<string, string> = { light: 'Lights', switch: 'Switches', fan: 'Fans', cover: 'Covers', lock: 'Locks', climate: 'Climate', scene: 'Scenes', script: 'Scripts', automation: 'Automations', input_boolean: 'Inputs' }
         return Object.entries(domainCounts)
           .sort((a, b) => b[1].on - a[1].on || b[1].total - a[1].total)
           .map(([d, c]) => this.statusCountLine(c.on, c.total, labels[d] || d))
@@ -919,8 +919,9 @@ export class UI {
       })
       return
     }
-    const items = this.favorites.map(f => this.entityLabel(f.entity_id))
-    const counts = this.countStates(this.favorites.map(f => f.entity_id))
+    const sortedIds = this.sortStatusEntities(this.favorites.map(f => f.entity_id))
+    const items = sortedIds.map(id => this.entityLabel(id))
+    const counts = this.countStates(sortedIds)
     await this.renderWithChrome(`Favorites ${counts.on} on / ${counts.off} off`, items)
   }
 
@@ -1359,8 +1360,8 @@ export class UI {
           itemWidth: UI.ACTION_BOX_W - 16,
           isItemSelectBorderEn: 1,
           itemName: [
-            'Cancel',
             'Delete',
+            'Cancel',
           ],
         }),
       })],
@@ -1375,13 +1376,13 @@ export class UI {
   private async todoDeleteConfirmSelect(idx: number) {
     if (this.screen.type !== 'todoDeleteConfirm') return
     const { entityId, itemUid } = this.screen
-    if (idx === 0) {
+    if (idx === 1) {
       // Cancel → back to detail
       this.screenStack.pop()
       await this.render()
       return
     }
-    if (idx === 1) {
+    if (idx === 0) {
       // Delete → remove via HA, refresh cache, pop back to list
       try {
         await this.ha.removeTodoItem(entityId, itemUid)
@@ -1447,8 +1448,8 @@ export class UI {
           itemWidth: UI.ACTION_BOX_W - 16,
           isItemSelectBorderEn: 1,
           itemName: [
-            'Cancel',
             `${action}`,
+            'Cancel',
             favLabel,
           ],
         }),
@@ -1657,8 +1658,9 @@ export class UI {
   }
 
   private async favoriteSelect(idx: number) {
-    if (idx >= this.favorites.length) return
-    await this.entitySelect(this.favorites[idx].entity_id)
+    const sortedIds = this.sortStatusEntities(this.favorites.map(f => f.entity_id))
+    if (idx >= sortedIds.length) return
+    await this.entitySelect(sortedIds[idx])
   }
 
   private async roomSelect(idx: number) {
@@ -1687,7 +1689,7 @@ export class UI {
 
   private async confirmSelect(idx: number) {
     if (this.screen.type !== 'confirm') return
-    if (idx === 0) { await this.goBack(); return }
+    if (idx === 1) { await this.goBack(); return }
     if (idx === 2) { await this.toggleFavourite(this.screen.entityId); return }
     await this.confirmExecute()
   }

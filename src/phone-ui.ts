@@ -2,7 +2,7 @@ import { HAClient } from './ha-client'
 import { getConfig, saveConfig, loadConfig } from './store'
 import type { AppConfig, FavoriteConfig, DashboardSlot, EnergySlot } from './store'
 
-const CONTROLLABLE_DOMAINS = ['light', 'switch', 'fan', 'cover', 'climate', 'scene', 'script', 'input_boolean']
+const CONTROLLABLE_DOMAINS = ['light', 'switch', 'fan', 'cover', 'climate', 'scene', 'script', 'automation', 'input_boolean']
 const SENSOR_DOMAINS = [
   'sensor', 'binary_sensor',
   'cover', 'lock', 'alarm_control_panel',
@@ -18,6 +18,7 @@ const DOMAIN_ICONS: Record<string, string> = {
   cover: '\u{1F6AA}',
   scene: '\u{1F3AC}',
   script: '\u{2699}',
+  automation: '\u{1F916}',
   input_boolean: '\u{1F518}',
   sensor: '\u{1F4CA}',
   binary_sensor: '\u{1F534}',

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.8 (2026-04-21)
+
+### Added
+- Automation domain support — automations can now be added to rooms and favourites, and triggered from the glasses or phone like scenes and scripts. Action label is "Trigger", service is `automation.trigger`.
+
+### Changed
+- Glasses confirm screen reordered: the action now defaults at the top (one click to fire), Cancel sits in the middle, the Favourite toggle moved to the bottom. Keeps the two main branches (do / don't) adjacent and pushes the rare favourite-toggle to the end.
+- Todo delete confirm swapped to `Delete, Cancel` so Delete is the default highlight.
+- Automation domain icon on the phone app is the robot glyph.
+
+### Fixed
+- Favourites tab now respects the configured sort (status / name / recent / custom) instead of showing raw config insertion order. Previously the home startpage column was sorted but the dedicated Favourites tab was not, so the two lists could disagree.
+- Selecting an entity from the sorted Favourites list now fires the correct entity (previously the handler indexed into the unsorted array).
+
 ## 1.0.7 (2026-04-21)
 
 ### Added

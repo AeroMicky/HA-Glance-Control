@@ -814,6 +814,7 @@ button.primary:active { opacity: 0.7; }
 .domain-icon.cover { background: #2d003d; color: #bf5af2; }
 .domain-icon.scene { background: #3d0a0a; color: #ff6961; }
 .domain-icon.script { background: #003d3d; color: #63e6be; }
+.domain-icon.automation { background: #3d2e00; color: #ffd60a; }
 .domain-icon.input_boolean { background: #00253d; color: #64d2ff; }
 .domain-icon.sensor { background: #1a1a3d; color: #5e5ce6; }
 .domain-icon.binary_sensor { background: #1a1a3d; color: #5e5ce6; }
@@ -1346,6 +1347,7 @@ code {
 [data-theme="light"] .domain-icon.cover { background: #f3e5f5; color: #7b1fa2; }
 [data-theme="light"] .domain-icon.scene { background: #fce4ec; color: #c62828; }
 [data-theme="light"] .domain-icon.script { background: #e0f2f1; color: #00695c; }
+[data-theme="light"] .domain-icon.automation { background: #fff8e1; color: #f57c00; }
 [data-theme="light"] .domain-icon.input_boolean { background: #e3f2fd; color: #1976d2; }
 [data-theme="light"] .domain-icon.sensor { background: #e8eaf6; color: #283593; }
 [data-theme="light"] .domain-icon.binary_sensor { background: #e8eaf6; color: #283593; }

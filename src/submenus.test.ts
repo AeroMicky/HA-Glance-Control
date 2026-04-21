@@ -172,6 +172,13 @@ describe('defaultServiceCall', () => {
     expect(script.serviceCall.service).toBe('turn_on')
   })
 
+  it('triggers automations', () => {
+    const automation = defaultServiceCall('automation.morning_routine', 'on')
+    expect(automation.action).toBe('Trigger')
+    expect(automation.serviceCall.domain).toBe('automation')
+    expect(automation.serviceCall.service).toBe('trigger')
+  })
+
   it('always targets the correct entity', () => {
     const result = defaultServiceCall('switch.pool_pump', 'off')
     expect(result.serviceCall.entityId).toBe('switch.pool_pump')
