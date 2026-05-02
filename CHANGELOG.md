@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.10 (2026-05-02)
+
+### Fixed
+- Aviation/large todo lists: glasses display went blank with "Loading..." stuck because the list-item label cap is 64 BYTES (UTF-8), not 64 chars. Multi-byte glyphs (em-dash, ellipsis, smart quotes, bullets) silently broke the render. Labels are now sanitized to ASCII equivalents and hard-truncated by byte length across every list (favourites, rooms, todo lists, todo actions, confirm screen, submenus).
+- Todo list "Loading..." was unrecoverable on slow HA: ring lock held during the fetch, double-tap ignored, list rendered after navigation. Fetches now run in the background, double-tap exits cleanly mid-load, and stale fetch results are dropped if the user navigated away.
+- Cover Open/Close was offered for position-only blinds even when the device didn't expose those services. Cover, fan, and climate submenus now reflect the entity's actual `supported_features` and attribute ranges (`min_temp`/`max_temp`/`target_temp_step`).
+- Empty list got cached forever when the 30 s timeout fired before HA responded; the cache no longer stores timeout results.
+- Phone browser CORS: REST `todo/get_items` is now skipped when the phone is cross-origin to HA, going straight to the WebSocket path.
+
+### Added
+- Lock domain support: locks now appear in the phone "Add" list and on the glasses, default to confirm-on-action.
+- New helper-entity domains: `input_button`, `input_select` (option picker), `input_number` (preset slider), `counter` (increment/decrement/reset), `timer` (start/pause/cancel/finish), and bare `button`.
+- Per-entity confirm mode: each favourite and room entity can be set to **Auto** (domain default), **Always confirm**, or **Never confirm** via a pill on the phone UI.
+- Light effects (WLED, MagicLight, etc.): if the entity exposes `effect_list`, every effect is selectable from the submenu; "Solid"/"None" pinned to the top.
+- Climate: `preset_mode` and `swing_mode` pickers, plus target/fan/preset/swing live readouts in the side info panel.
+- Fan: oscillate on/off and `preset_mode` picker.
+- Room search: search box on the Rooms tab filters entities across all rooms; non-matching rooms are hidden.
+
+### Changed
+- Room view + home Recent strip now show plain entity names (no `> 100% / on / off` suffix). Favourites still show state details.
+- Recent on home is treated as a list of entities, not last actions: clicking opens the entity's submenu instead of replaying the previous service call.
+- Stateful entities (light, switch, fan, lock, input_boolean) always open a submenu so the user picks the action explicitly. The "Confirm: Never" override only skips the post-pick confirm, not the picker.
+- Stateless entities (scene, button, input_button) keep one-tap instant fire — they have no state to disambiguate.
+- Climate temperature presets use the entity's reported range and step instead of a hard-coded 16–28 °C.
+- Phone Rooms tab: only the entities you've selected show by default per room; type in the search box to reveal unselected ones with an "+" button.
+
+### Developer
+- Extracted `fireServiceWithFeedback` helper — three near-identical copies of the loading→call→result flow are now one path with offline fast-fail.
+- Hoisted `TextEncoder` to a static field; was constructed per list-label render call.
+- Cache invalidation on todo toggle/delete so the next list view shows fresh data.
+- Config schema bumped to v3 with a `confirmModes` migration.
+
+## 1.0.9 (2026-04-22)
+
+### Added
+- Rooms tab: new top "Rooms" card with drag-to-reorder, per-room enable/disable toggle, and Custom/Recent sort mode. Disabled rooms are hidden from the glasses entirely.
+- `disabledRooms` config field.
+
+### Changed
+- Favourites: removed the 8-item cap. Users can add as many as they like.
+- Action flow: confirm screen now swaps to a "Sending..." loading screen during the HA call, with the ring kept responsive. Users can double-click to back out during a slow call.
+- Result toast duration reduced from 2000ms to 800ms (snappier feedback on scenes, brightness, colour, cover position, climate, etc.).
+
+### Fixed
+- Drag-to-reorder on touch devices (phones): `touchmove` was passive, so mobile browsers ate the gesture as page-scroll. Reorder now works on iOS and Android for favourites, rooms, and per-room entities.
+- Bluetooth reconnect: after the phone walked out of BT range and returned, the glasses plugin appeared frozen because `rebuildPageContainer` was called against containers the glasses had dropped. Now forces a full `createStartUpPageContainer` rebuild on reconnect.
+
 ## 1.0.8 (2026-04-21)
 
 ### Added

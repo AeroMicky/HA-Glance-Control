@@ -5,12 +5,12 @@ import { buildSubItems, defaultServiceCall } from './submenus'
 
 describe('buildSubItems', () => {
   describe('lights', () => {
-    it('returns null for on/off-only lights with no brightness', () => {
-      const result = buildSubItems('light.basic', {
+    it('returns minimal on/off submenu for basic lights', () => {
+      const items = buildSubItems('light.basic', {
         state: 'on',
         attributes: { supported_color_modes: ['onoff'] },
-      })
-      expect(result).toBeNull()
+      })!
+      expect(items.map(i => i.label)).toEqual(['Turn ON', 'Turn OFF'])
     })
 
     it('returns brightness controls for dimmable lights', () => {
@@ -19,19 +19,19 @@ describe('buildSubItems', () => {
         attributes: { supported_color_modes: ['brightness'] },
       })!
       expect(items).not.toBeNull()
-      expect(items[0].label).toBe('Turn OFF')
-      expect(items[0].serviceCall.service).toBe('turn_off')
+      expect(items[0].label).toBe('Turn ON')
+      expect(items[1].label).toBe('Turn OFF')
       expect(items.find(i => i.label === 'Brightness 50%')).toBeDefined()
       expect(items.find(i => i.label === 'Brightness 100%')).toBeDefined()
     })
 
-    it('shows Turn ON when light is off', () => {
+    it('exposes both Turn ON and Turn OFF regardless of state', () => {
       const items = buildSubItems('light.lounge', {
         state: 'off',
         attributes: { supported_color_modes: ['brightness'] },
       })!
-      expect(items[0].label).toBe('Turn ON')
-      expect(items[0].serviceCall.service).toBe('turn_on')
+      expect(items.find(i => i.label === 'Turn ON')).toBeDefined()
+      expect(items.find(i => i.label === 'Turn OFF')).toBeDefined()
     })
 
     it('includes color options for hs-capable lights', () => {
@@ -68,24 +68,41 @@ describe('buildSubItems', () => {
   })
 
   describe('fans', () => {
-    it('returns speed controls', () => {
+    it('returns speed controls when SET_SPEED supported', () => {
       const items = buildSubItems('fan.bedroom', {
         state: 'on',
-        attributes: {},
+        attributes: { supported_features: 1 },
       })!
-      expect(items[0].label).toBe('Turn OFF')
+      expect(items[0].label).toBe('Turn ON')
+      expect(items[1].label).toBe('Turn OFF')
       expect(items.find(i => i.label === 'Speed 60%')).toBeDefined()
       expect(items.find(i => i.label === 'Speed 100%')).toBeDefined()
+    })
+
+    it('omits speed presets when SET_SPEED not supported', () => {
+      const items = buildSubItems('fan.basic', {
+        state: 'on',
+        attributes: { supported_features: 0 },
+      })!
+      expect(items.find(i => i.label?.startsWith('Speed '))).toBeUndefined()
     })
   })
 
   describe('covers', () => {
-    it('returns open/close/stop without position when unsupported', () => {
+    it('returns open/close/stop when those bits are set', () => {
       const items = buildSubItems('cover.garage', {
         state: 'closed',
-        attributes: { supported_features: 0 },
+        attributes: { supported_features: 1 | 2 | 8 },
       })!
       expect(items.map(i => i.label)).toEqual(['Open', 'Close', 'Stop'])
+    })
+
+    it('returns null when no cover features supported', () => {
+      const items = buildSubItems('cover.deadbolt', {
+        state: 'closed',
+        attributes: { supported_features: 0 },
+      })
+      expect(items).toBeNull()
     })
 
     it('includes position controls when supported (bit 2)', () => {
@@ -103,21 +120,22 @@ describe('buildSubItems', () => {
       const items = buildSubItems('climate.ac', {
         state: 'cool',
         attributes: {
+          // bit 1 = TARGET_TEMPERATURE, bit 8 = FAN_MODE
+          supported_features: 1 | 8,
           hvac_modes: ['off', 'cool', 'heat', 'auto'],
           fan_modes: ['low', 'high'],
           fan_mode: 'low',
+          min_temp: 16,
+          max_temp: 28,
+          target_temp_step: 1,
         },
       })!
-      // Should have Turn OFF (since state !== 'off')
-      expect(items[0].label).toBe('Turn OFF')
-      // Should skip 'off' from hvac_modes list
+      expect(items.find(i => i.label === 'Turn ON')).toBeDefined()
+      expect(items.find(i => i.label === 'Turn OFF')).toBeDefined()
       expect(items.find(i => i.label === 'Mode: off')).toBeUndefined()
-      // Current mode marked with *
       expect(items.find(i => i.label === 'Mode: cool *')).toBeDefined()
       expect(items.find(i => i.label === 'Mode: heat')).toBeDefined()
-      // Temperature range
       expect(items.find(i => i.label === '22\u00B0C')).toBeDefined()
-      // Fan modes with current marked
       expect(items.find(i => i.label === 'Fan: low *')).toBeDefined()
       expect(items.find(i => i.label === 'Fan: high')).toBeDefined()
     })

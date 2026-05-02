@@ -2,7 +2,13 @@ import { HAClient } from './ha-client'
 import { getConfig, saveConfig, loadConfig } from './store'
 import type { AppConfig, FavoriteConfig, DashboardSlot, EnergySlot } from './store'
 
-const CONTROLLABLE_DOMAINS = ['light', 'switch', 'fan', 'cover', 'climate', 'scene', 'script', 'automation', 'input_boolean']
+const CONTROLLABLE_DOMAINS = [
+  'light', 'switch', 'fan', 'cover', 'climate',
+  'scene', 'script', 'automation',
+  'input_boolean', 'input_button', 'input_select', 'input_number',
+  'counter', 'timer',
+  'lock', 'button',
+]
 const SENSOR_DOMAINS = [
   'sensor', 'binary_sensor',
   'cover', 'lock', 'alarm_control_panel',
@@ -20,6 +26,12 @@ const DOMAIN_ICONS: Record<string, string> = {
   script: '\u{2699}',
   automation: '\u{1F916}',
   input_boolean: '\u{1F518}',
+  input_button: '\u{1F518}',
+  input_select: '\u{1F4CB}',
+  input_number: '\u{1F39A}',
+  counter: '\u{1F522}',
+  timer: '\u{23F2}',
+  button: '\u{1F518}',
   sensor: '\u{1F4CA}',
   binary_sensor: '\u{1F534}',
   climate: '\u{1F321}',
@@ -574,7 +586,7 @@ export class PhoneUI {
     const favIds = new Set(config.favorites.map(f => f.entity_id))
 
     el.innerHTML = `
-      <p class="section-header">Selected (${config.favorites.length}/8)</p>
+      <p class="section-header">Selected (${config.favorites.length})</p>
       ${config.favorites.length === 0 ? `
         <div class="empty-state">
           <p class="empty-title">No favorites yet</p>
@@ -598,6 +610,7 @@ export class PhoneUI {
                   <span class="subtitle">${this.formatState(state, entity)}</span>
                 </div>
                 <div class="row-right">
+                  ${this.confirmModePillHtml(f.entity_id)}
                   <span class="remove-btn" data-remove-fav="${f.entity_id}" aria-label="Remove">&minus;</span>
                 </div>
               </div>
@@ -639,14 +652,11 @@ export class PhoneUI {
       row.addEventListener('click', () => {
         if (row.classList.contains('is-adding')) return
         const current = getConfig().favorites
-        if (current.length >= 8) return  // limit reached — silent no-op (matches existing behaviour)
         row.classList.add('is-adding')
         const id = row.getAttribute('data-id')!
         window.setTimeout(() => {
           const now = getConfig().favorites
-          if (now.length < 8) {
-            saveConfig({ favorites: [...now, { entity_id: id, label: this.friendlyName(id) }] })
-          }
+          saveConfig({ favorites: [...now, { entity_id: id, label: this.friendlyName(id) }] })
           this.render()
         }, 180)
       })
@@ -679,9 +689,26 @@ export class PhoneUI {
           return
         }
 
+        if (target.closest('.confirm-mode-pill')) {
+          e.stopPropagation()
+          this.cycleConfirmMode(id)
+          return
+        }
+
         this.showItemActions(id, displayName, 'favorite')
       })
     })
+  }
+
+  // Auto -> Always -> Never -> Auto.
+  private cycleConfirmMode(entityId: string) {
+    const modes = { ...(getConfig().confirmModes ?? {}) }
+    const current = modes[entityId]
+    if (current === undefined) modes[entityId] = 'always'
+    else if (current === 'always') modes[entityId] = 'never'
+    else delete modes[entityId]  // back to auto
+    saveConfig({ confirmModes: modes })
+    this.render()
   }
 
   private renderRooms(el: HTMLElement, config: AppConfig) {
@@ -700,17 +727,52 @@ export class PhoneUI {
     const configuredRooms = config.rooms
     const sortModes = config.roomSortMode ?? {}
     const roomListSortMode = config.roomListSortMode ?? 'custom'
+    const disabled = new Set(config.disabledRooms ?? [])
     const sortedRoomEntries = this.sortRoomList(Object.entries(haRooms), config)
+    const enabledRoomEntries = sortedRoomEntries.filter(([name]) => !disabled.has(name))
 
     el.innerHTML = `
-      <div class="rooms-list-header">
-        <p class="hint" style="margin-top:4px;flex:1">Select entities to show on your glasses under each room.</p>
-        <div class="sort-toggle" id="room-list-sort">
-          <button class="sort-toggle-btn ${roomListSortMode === 'custom' ? 'active' : ''}" data-mode="custom">Custom</button>
-          <button class="sort-toggle-btn ${roomListSortMode === 'recent' ? 'active' : ''}" data-mode="recent">Recent</button>
+      <p class="section-header">Rooms</p>
+      <p class="hint" style="margin-top:0">
+        ${roomListSortMode === 'custom'
+          ? 'Drag to reorder. Toggle to show or hide on glasses.'
+          : 'Rooms sort by most-recently-used. Switch to Custom to drag-reorder.'}
+      </p>
+      <div class="card">
+        <div class="rooms-list-header" style="padding:8px 12px;border-bottom:1px solid var(--border,#3a3a3c)">
+          <span style="flex:1;font-size:13px;color:#8e8e93">${enabledRoomEntries.length} of ${sortedRoomEntries.length} enabled</span>
+          <div class="sort-toggle" id="room-list-sort">
+            <button class="sort-toggle-btn ${roomListSortMode === 'custom' ? 'active' : ''}" data-mode="custom">Custom</button>
+            <button class="sort-toggle-btn ${roomListSortMode === 'recent' ? 'active' : ''}" data-mode="recent">Recent</button>
+          </div>
+        </div>
+        <div class="entity-list" id="room-order-list">
+          ${sortedRoomEntries.map(([room, entityIds], roomIdx) => {
+            const included = configuredRooms[room] ?? []
+            const isDisabled = disabled.has(room)
+            return `
+              <div class="entity-row" data-room-toggle="${this.escHtml(room)}" style="${isDisabled ? 'opacity:0.5' : ''}">
+                ${roomListSortMode === 'custom' ? `
+                  <div class="drag-handle" data-drag-idx="${roomIdx}" data-drag-list="room-order"><span></span><span></span><span></span></div>
+                ` : ''}
+                <div class="row-text">
+                  <span class="name">${this.escHtml(room)}</span>
+                  <span class="subtitle">${included.length}/${entityIds.length} entities</span>
+                </div>
+                <div class="row-right">
+                  <input type="checkbox" ${isDisabled ? '' : 'checked'} data-room-enable="${this.escHtml(room)}" style="cursor:pointer;width:20px;height:20px">
+                </div>
+              </div>
+            `
+          }).join('')}
         </div>
       </div>
-      ${sortedRoomEntries.map(([room, entityIds], roomIdx) => {
+
+      <p class="section-header">Entities per room</p>
+      <p class="hint" style="margin-top:0">Select entities to show on your glasses under each room.</p>
+      <input class="search-input" id="room-entity-search" type="text" placeholder="Search by name or entity ID..." style="margin-bottom:12px">
+      <div class="hint" id="room-search-empty" style="display:none;margin-top:0">No entities match.</div>
+      ${enabledRoomEntries.map(([room, entityIds]) => {
         const included = configuredRooms[room] ?? []
         const includedSet = new Set(included)
         const sortMode = sortModes[room] ?? 'custom'
@@ -721,9 +783,6 @@ export class PhoneUI {
           <div class="room-block">
             <div class="room-header">
               <div class="room-header-left">
-                ${roomListSortMode === 'custom' ? `
-                  <div class="drag-handle" data-drag-idx="${roomIdx}" data-drag-list="room-order"><span></span><span></span><span></span></div>
-                ` : ''}
                 <span>${this.escHtml(room)} <span class="count">(${included.length}/${entityIds.length})</span></span>
               </div>
               <div class="room-header-actions">
@@ -754,6 +813,7 @@ export class PhoneUI {
                         <span class="subtitle">${this.formatState(state, entity)}</span>
                       </div>
                       <div class="row-right">
+                        ${this.confirmModePillHtml(id)}
                         <span class="remove-btn" data-remove-room="${id}" aria-label="Remove">&minus;</span>
                       </div>
                     </div>
@@ -761,7 +821,7 @@ export class PhoneUI {
                 </div>
               </div>
             ` : ''}
-            <div class="card">
+            <div class="card room-add-card" style="display:none">
               <div class="entity-list">
                 ${entityIds.filter(id => !includedSet.has(id)).map(id => {
                   const entity = this.ha!.getEntity(id)
@@ -782,6 +842,9 @@ export class PhoneUI {
                 `}).join('')}
               </div>
             </div>
+            ${sortedIncluded.length === 0 ? `
+              <p class="hint" style="margin-top:8px">No entities yet. Search above to add.</p>
+            ` : ''}
           </div>
         `
       }).join('')}
@@ -807,6 +870,19 @@ export class PhoneUI {
       this.render()
     })
 
+    // Enable/disable room toggle (top rooms card)
+    el.querySelectorAll<HTMLInputElement>('input[data-room-enable]').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        e.stopPropagation()
+        const room = cb.getAttribute('data-room-enable')!
+        const cur = new Set(getConfig().disabledRooms ?? [])
+        if (cb.checked) cur.delete(room)
+        else cur.add(room)
+        saveConfig({ disabledRooms: [...cur] })
+        this.render()
+      })
+    })
+
     // Per-room entity sort toggle buttons
     el.querySelectorAll('.sort-toggle[data-room-sort]').forEach(toggle => {
       toggle.querySelectorAll('.sort-toggle-btn').forEach(btn => {
@@ -821,9 +897,9 @@ export class PhoneUI {
       })
     })
 
-    // Drag to reorder room entities
+    // Drag to reorder room entities (enabled rooms only — disabled ones have no entity card)
     const haRoomsForDrag = haRooms
-    for (const [room] of sortedRoomEntries) {
+    for (const [room] of enabledRoomEntries) {
       this.bindDragReorder(el, `room-${room}`, (fromIdx, toIdx) => {
         const rooms = { ...getConfig().rooms }
         const current = [...(rooms[room] ?? [])]
@@ -859,6 +935,12 @@ export class PhoneUI {
           return
         }
 
+        if (target.closest('.confirm-mode-pill')) {
+          e.stopPropagation()
+          this.cycleConfirmMode(id)
+          return
+        }
+
         // Row body tap → actions menu (Rename / Remove)
         this.showRoomItemActions(id, displayName, room)
       })
@@ -890,6 +972,42 @@ export class PhoneUI {
       })
     })
 
+    // Per-entity search across all room blocks. Hides non-matching rows and
+    // empty room blocks. Empty query restores everything.
+    const searchInput = el.querySelector<HTMLInputElement>('#room-entity-search')
+    const emptyHint = el.querySelector<HTMLElement>('#room-search-empty')
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        const q = searchInput.value.toLowerCase().trim()
+        let anyVisible = false
+        el.querySelectorAll<HTMLElement>('.room-block').forEach(block => {
+          let blockHasMatch = false
+          let addCardHasMatch = false
+          block.querySelectorAll<HTMLElement>('.entity-row[data-id]').forEach(row => {
+            const isAdd = row.classList.contains('add-row')
+            const text = (row.textContent ?? '').toLowerCase() + ' ' + (row.getAttribute('data-id') ?? '').toLowerCase()
+            const match = q !== '' && text.includes(q)
+            if (isAdd) {
+              // Add-rows only show on a non-empty matching query.
+              row.style.display = match ? '' : 'none'
+              if (match) addCardHasMatch = true
+            } else {
+              // Selected rows: visible by default, filtered by query when typed.
+              row.style.display = (q === '' || match) ? '' : 'none'
+              if (q === '' || match) blockHasMatch = true
+            }
+          })
+          // Toggle the add-card visibility as a whole.
+          const addCard = block.querySelector<HTMLElement>('.room-add-card')
+          if (addCard) addCard.style.display = addCardHasMatch ? '' : 'none'
+          // Show whole block if any selected matches OR query reveals add-rows.
+          const blockVisible = q === '' || blockHasMatch || addCardHasMatch
+          block.style.display = blockVisible ? '' : 'none'
+          if (blockVisible) anyVisible = true
+        })
+        if (emptyHint) emptyHint.style.display = (q !== '' && !anyVisible) ? '' : 'none'
+      })
+    }
   }
 
   private renderSensors(el: HTMLElement, config: AppConfig) {
@@ -1486,6 +1604,15 @@ export class PhoneUI {
     return `<div class="domain-icon ${cls}">${icon}</div>`
   }
 
+  // Per-entity confirm mode pill. Cycles Auto -> Always -> Never -> Auto.
+  // Title shows resolved behavior so user understands the auto default.
+  private confirmModePillHtml(entityId: string): string {
+    const mode = (getConfig().confirmModes ?? {})[entityId]  // undefined = auto
+    const label = mode === 'always' ? 'Confirm: Yes' : mode === 'never' ? 'Confirm: No' : 'Confirm: Auto'
+    const cls = mode === 'always' ? 'mode-always' : mode === 'never' ? 'mode-never' : 'mode-auto'
+    return `<button class="confirm-mode-pill ${cls}" data-confirm-pill="${entityId}" type="button" title="Click to change confirmation behavior">${label}</button>`
+  }
+
   private formatState(state: string, entity: { attributes: Record<string, unknown> } | undefined | null): string {
     if (!state || state === 'unknown' || state === 'unavailable') return state
     const unit = entity?.attributes?.unit_of_measurement as string | undefined
@@ -1670,12 +1797,17 @@ export class PhoneUI {
       })
     })
 
+    // touchmove must be non-passive so preventDefault stops page-scroll while
+    // dragging — otherwise the browser eats the gesture as a scroll before
+    // dragOver can update. Default is passive on all modern mobile browsers.
     container.addEventListener('touchmove', (e) => {
       if (dragIdx < 0) return
+      e.preventDefault()
       updateDragOver(e.touches[0].clientY)
-    }, { passive: true })
+    }, { passive: false })
 
     container.addEventListener('touchend', commitDrop)
+    container.addEventListener('touchcancel', commitDrop)
   }
 
   private isDarkMode(): boolean {

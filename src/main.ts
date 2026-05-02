@@ -72,10 +72,22 @@ async function main() {
 
   // Re-render glasses when device reconnects
   if (bridge) {
+    let wasDisconnected = false
     bridge.onDeviceStatusChanged((status) => {
       console.log('[Main] Device status:', status.connectType)
       if (status.connectType === DeviceConnectType.Connected && glassesUI) {
-        glassesUI.render()
+        // If we just came back from a disconnect, glasses dropped our page
+        // containers while out of range — a plain render() would call
+        // rebuildPageContainer against missing IDs and silently no-op.
+        // Full reset forces createStartUpPageContainer instead.
+        if (wasDisconnected) {
+          wasDisconnected = false
+          glassesUI.resetForReconnect().catch(console.error)
+        } else {
+          glassesUI.render().catch(console.error)
+        }
+      } else if (status.connectType !== DeviceConnectType.Connected) {
+        wasDisconnected = true
       }
     })
 
@@ -106,12 +118,17 @@ async function main() {
 
 function applyConfig(ui: UI) {
   const config = getConfig()
+  const disabled = new Set(config.disabledRooms ?? [])
+  const enabledRooms: Record<string, string[]> = {}
+  for (const [name, ids] of Object.entries(config.rooms)) {
+    if (!disabled.has(name)) enabledRooms[name] = ids
+  }
   ui.configure({
     favorites: config.favorites,
     headerSensors: config.headerSensors,
     footerSensors: config.footerSensors,
-    rooms: config.rooms,
-    roomOrder: config.roomOrder,
+    rooms: enabledRooms,
+    roomOrder: (config.roomOrder ?? []).filter(n => !disabled.has(n)),
     roomListSortMode: config.roomListSortMode,
     roomSortMode: config.roomSortMode,
     enabledTodoLists: config.enabledTodoLists,

@@ -11,7 +11,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { HAClient } from './ha-client'
 import { FavoriteConfig, SensorSlot, getConfig, saveConfig } from './store'
-import { buildSubItems, defaultServiceCall, SubItem, ServiceCall } from './submenus'
+import { buildSubItems, defaultServiceCall, shouldConfirm, SubItem, ServiceCall } from './submenus'
 
 // Layout constants — 576x288 4-bit greyscale display
 const W = 576
@@ -187,6 +187,21 @@ export class UI {
     }, ms)
   }
 
+  // Glasses lost BT while plugin was running (phone walked out of range) and
+  // then reconnected. Containers on the glasses side are gone, so the next
+  // render must use createStartUpPageContainer, not rebuildPageContainer.
+  // Called by main.ts on DeviceConnectType.Connected after a disconnect.
+  async resetForReconnect() {
+    this.startupRendered = false
+    this.lastHeaderContent = ''
+    this.lastFooterContent = ''
+    this.footerPage = 0
+    this.headerPage = 0
+    this.headerScrollOffset = 0
+    this.footerScrollOffset = 0
+    try { await this.render() } catch (err) { console.error('[UI] reconnect render failed:', err) }
+  }
+
   async start() {
     this.bridge.onEvenHubEvent((event) => {
       const sysType = event.sysEvent?.eventType
@@ -300,6 +315,26 @@ export class UI {
     return s.length <= max ? s : s.substring(0, max - 1) + '\u2026'
   }
 
+  // Glasses ListContainer.itemName has a 64 BYTE (UTF-8) cap, not 64 chars.
+  // Multi-byte chars (em-dash \u2014, ellipsis \u2026, smart quotes, bullets \u25cf \u25cb) push
+  // past the byte cap silently \u2014 rebuildPageContainer succeeds but the list
+  // never paints. Sanitize ASCII equivalents and hard-truncate by byte length.
+  // Cap at 60 bytes for headroom against any remaining multi-byte glyph.
+  private static labelEncoder = new TextEncoder()
+  private sanitizeListLabel(s: string): string {
+    let line = (s ?? '').toString()
+      .replace(/[\u2014\u2013]/g, '-')
+      .replace(/\u2026/g, '...')
+      .replace(/[\u201c\u201d]/g, '"')
+      .replace(/[\u2018\u2019]/g, "'")
+    const enc = UI.labelEncoder
+    if (enc.encode(line).length <= 60) return line
+    while (enc.encode(line).length > 57 && line.length > 1) {
+      line = line.slice(0, -1)
+    }
+    return line + '...'
+  }
+
   private makeHeaderText(title: string): TextContainerProperty {
     const config = getConfig()
     const clock = config.clock ?? { show: true, format: '24h' }
@@ -374,7 +409,7 @@ export class UI {
   }
 
   private makeList(items: string[]): ListContainerProperty {
-    const capped = items.slice(0, 20).map(s => this.truncate(s, 64))
+    const capped = items.slice(0, 20).map(s => this.sanitizeListLabel(s))
     return new ListContainerProperty({
       containerID: 2,
       containerName: 'list',
@@ -533,13 +568,26 @@ export class UI {
           if (a.color_temp_kelvin != null) lines.push(`Temp: ${a.color_temp_kelvin}K`)
           if (a.rgb_color) { const [r, g, b] = a.rgb_color as number[]; lines.push(`RGB: ${r},${g},${b}`) }
           if (a.current_temperature != null) lines.push(`Temp: ${a.current_temperature}${a.temperature_unit || '\u00b0'}`)
+          if (a.temperature != null && a.current_temperature != null && a.temperature !== a.current_temperature) {
+            lines.push(`Set: ${a.temperature}${a.temperature_unit || '\u00b0'}`)
+          }
           if (a.hvac_action) lines.push(`${a.hvac_action}`)
+          if (a.fan_mode) lines.push(`Fan: ${a.fan_mode}`)
+          if (a.preset_mode) lines.push(`Preset: ${a.preset_mode}`)
+          if (a.swing_mode) lines.push(`Swing: ${a.swing_mode}`)
           if (a.percentage != null) lines.push(`Speed: ${a.percentage}%`)
+          if (a.oscillating === true) lines.push(`Oscillating`)
           if (a.current_position != null) lines.push(`Pos: ${a.current_position}%`)
+          if (a.current_tilt_position != null) lines.push(`Tilt: ${a.current_tilt_position}%`)
+          if (a.option) lines.push(`${this.statusTrunc(a.option as string)}`)
+          if (a.value != null && typeof a.value === 'number') lines.push(`Value: ${a.value}`)
           if (a.media_title) lines.push(`${this.statusTrunc(a.media_title as string)}`)
           if (a.media_artist) lines.push(`${this.statusTrunc(a.media_artist as string)}`)
           if (a.source) lines.push(`Src: ${this.statusTrunc(a.source as string)}`)
+          if (a.volume_level != null) lines.push(`Vol: ${Math.round((a.volume_level as number) * 100)}%`)
           if (a.battery_level != null) lines.push(`Bat: ${a.battery_level}%`)
+          if (a.duration) lines.push(`${a.duration}`)
+          if (a.remaining) lines.push(`Left: ${a.remaining}`)
           if (a.device_class && !lines.some(l => l.includes(a.device_class as string))) lines.push(`${a.device_class}`)
         }
         return lines
@@ -893,22 +941,39 @@ export class UI {
       `\u25A3 Rooms (${roomCount}) ${ARROW_R}`,
     ]
     if (todoCount > 0) items.push(`\u25A4 Lists (${todoCount}) ${ARROW_R}`)
-    for (const id of recent) items.push(this.entityLabel(id))
+    for (const id of recent) items.push(this.entityLabel(id, { withDetail: false }))
     await this.renderWithChrome('HA', items)
   }
 
-  private prefetchTodoItems() {
-    const enabled = this.ha.getTodoEntities().filter(e => this.enabledTodoLists.includes(e.entity_id))
-    if (enabled.length !== 1) return
-    const entityId = enabled[0].entity_id
-    if (this.todoEntityId === entityId && this.todoSortedItems !== null) return  // already warm
-    this.ha.getTodoItems(entityId).then(items => {
-      if (this.todoEntityId === entityId) return  // user already navigated, don't overwrite
-      const pending = items.filter(i => !i.done)
-      const done = items.filter(i => i.done)
-      this.todoSortedItems = [...pending, ...done].slice(0, 20)
-      this.todoEntityId = entityId
-    }).catch(() => {})
+  // Cache all enabled todo lists in background so first user-tap is instant.
+  private todoCache: Map<string, import('./ha-client').TodoItem[]> = new Map()
+  private prefetchInFlight = false
+  private async prefetchTodoItems() {
+    if (this.prefetchInFlight) return
+    this.prefetchInFlight = true
+    try {
+      const enabled = this.ha.getTodoEntities().filter(e => this.enabledTodoLists.includes(e.entity_id))
+      for (const ent of enabled) {
+        const entityId = ent.entity_id
+        if (this.todoCache.has(entityId)) continue
+        try {
+          const items = await this.ha.getTodoItems(entityId)
+          this.todoCache.set(entityId, items)
+          if (this.screen.type === 'todoList' && this.screen.entityId === entityId && this.todoSortedItems === null) {
+            const pending = items.filter(i => !i.done)
+            const done = items.filter(i => i.done)
+            this.todoSortedItems = [...pending, ...done].slice(0, 20)
+            this.todoEntityId = entityId
+            this.todoSelectedIdx = 0
+            await this.render().catch(() => {})
+          }
+        } catch (err) {
+          console.warn(`[HA] prefetch ${entityId} failed:`, err)
+        }
+      }
+    } finally {
+      this.prefetchInFlight = false
+    }
   }
 
   private async renderFavorites() {
@@ -949,7 +1014,7 @@ export class UI {
     const canonical = this.rooms.get(name) ?? this.screen.entityIds
     const entityIds = this.sortRoomEntities(name, canonical)
     this.screen.entityIds = entityIds
-    const items = entityIds.map(id => this.entityLabel(id))
+    const items = entityIds.map(id => this.entityLabel(id, { withDetail: false }))
     const c = this.countStates(entityIds)
     await this.renderWithChrome(`${name} ${c.on}/${c.total}`, items)
   }
@@ -960,6 +1025,47 @@ export class UI {
   private todoSelectedIdx = 0
   private todoReadPage = 0
   private todoDetailActions: Array<'toggle' | 'read' | 'delete'> = []
+  private todoFetchReqId = 0  // increments to invalidate in-flight fetches when user navigates away
+
+  // Background fetch — runs after render() so the event loop releases the
+  // ring lock; user can double-tap to back out of "Loading..." mid-fetch.
+  // Stale results (user navigated to different list / popped screen) are dropped via reqId.
+  private async fetchTodoItemsBackground(entityId: string): Promise<void> {
+    const myReqId = ++this.todoFetchReqId
+    // Multi-list cache: instant if a previous prefetch landed
+    const cached = this.todoCache.get(entityId)
+    let items: import('./ha-client').TodoItem[] = cached ?? []
+    if (!cached) {
+      let timedOut = false
+      try {
+        items = await Promise.race([
+          this.ha.getTodoItems(entityId),
+          new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => {
+            timedOut = true
+            resolve([])
+          }, 30000)),
+        ])
+        if (!timedOut) this.todoCache.set(entityId, items)
+      } catch { /* keep empty, do not cache failed fetch */ }
+    }
+    if (myReqId !== this.todoFetchReqId) return  // newer request superseded us
+    if (this.screen.type !== 'todoList' || this.screen.entityId !== entityId) return
+    const pending = items.filter(i => !i.done)
+    const done = items.filter(i => i.done)
+    this.todoSortedItems = [...pending, ...done].slice(0, 20)
+    this.todoEntityId = entityId
+    this.todoSelectedIdx = 0
+    // Glasses SDK drops back-to-back rebuildPageContainer calls; pause so the
+    // initial Loading frame propagates before we replace it.
+    await new Promise(r => setTimeout(r, 300))
+    if (myReqId !== this.todoFetchReqId) return
+    if (this.screen.type !== 'todoList' || this.screen.entityId !== entityId) return
+    try {
+      await this.render()
+    } catch (err) {
+      console.warn(`[UI] renderTodoList threw for ${entityId}:`, err)
+    }
+  }
 
   // --- Todo: date formatting ---
   private formatTodoDue(due?: string): string {
@@ -1015,14 +1121,15 @@ export class UI {
     const icon = item.done ? '\u25cf' : '\u25cb'
     const due = this.formatTodoDue(item.due)
     const desc = item.description ? item.description.replace(/\n/g, ' ').trim() : ''
-    const summaryMax = due ? Math.min(item.summary.length, 24) : Math.min(item.summary.length, 36)
-    let line = `${icon} ${this.truncate(item.summary, summaryMax)}`
+    const summary = (item.summary ?? '').toString() || '(no title)'
+    const summaryMax = due ? Math.min(summary.length, 24) : Math.min(summary.length, 36)
+    let line = `${icon} ${this.truncate(summary, summaryMax)}`
     if (due) line += `  ${due}`
     if (desc) {
       const remaining = Math.min(20, MAX - line.length - 2)
       if (remaining > 4) line += `  ${this.truncate(desc, remaining)}`
     }
-    return line.substring(0, MAX)
+    return this.sanitizeListLabel(line.substring(0, MAX))
   }
 
   // --- Todo: renderers (ALL use renderWithChrome — proven on glasses) ---
@@ -1045,7 +1152,7 @@ export class UI {
         borderWidth: 0, borderRadius: 0, paddingLength: 6, isEventCapture: 1,
         itemContainer: new ListItemContainerProperty({
           itemCount: labels.length, itemWidth: W - 16,
-          isItemSelectBorderEn: 1, itemName: labels,
+          isItemSelectBorderEn: 1, itemName: labels.map(l => this.sanitizeListLabel(l)),
         }),
       })],
       textObject: [this.makeHeaderText(header), this.makeFooterText()],
@@ -1086,7 +1193,7 @@ export class UI {
       containerTotalNum: 3,
       listObject: [new ListContainerProperty({
         containerID: 2,
-        containerName: 'todolist',
+        containerName: loading ? 'todolist-loading' : 'todolist',
         xPosition: 0,
         yPosition: BODY_TOP,
         width: W,
@@ -1185,7 +1292,7 @@ export class UI {
           itemCount: actions.length,
           itemWidth: ACTION_W - 12,
           isItemSelectBorderEn: 1,
-          itemName: actions,
+          itemName: actions.map(a => this.sanitizeListLabel(a)),
         }),
       })],
       textObject: [
@@ -1271,21 +1378,18 @@ export class UI {
     const todoEntities = allTodoEntities.filter(e => this.enabledTodoLists.includes(e.entity_id))
     if (idx >= todoEntities.length) return
     const entityId = todoEntities[idx].entity_id
+    // Cache hit: render instantly without re-fetch.
+    if (this.todoEntityId === entityId && this.todoSortedItems !== null) {
+      this.todoSelectedIdx = 0
+      this.push({ type: 'todoList', entityId })
+      await this.render()
+      return
+    }
     this.todoSortedItems = null
     this.todoSelectedIdx = 0
     this.push({ type: 'todoList', entityId })
     await this.render()  // show Loading... immediately
-    try {
-      const items = await Promise.race([
-        this.ha.getTodoItems(entityId),
-        new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 8000)),
-      ])
-      const pending = items.filter(i => !i.done)
-      const done = items.filter(i => i.done)
-      this.todoSortedItems = [...pending, ...done].slice(0, 20)
-      this.todoSelectedIdx = 0
-    } catch { /* keep empty */ }
-    if (this.screen.type === 'todoList') await this.render()
+    void this.fetchTodoItemsBackground(entityId)
   }
 
   private async todoItemSelect(idx: number) {
@@ -1322,12 +1426,13 @@ export class UI {
       // Toggle done/pending
       const markingDone = !item.done
       await this.ha.updateTodoItem(entityId, item.uid, markingDone)
-      // Refresh items then go back to list
+      this.todoCache.delete(entityId)  // mutated remotely — drop cache
       try {
         const fresh = await Promise.race([
           this.ha.getTodoItems(entityId),
           new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 5000)),
         ])
+        if (fresh.length > 0) this.todoCache.set(entityId, fresh)
         const p = fresh.filter(i => !i.done)
         const d = fresh.filter(i => i.done)
         this.todoSortedItems = [...p, ...d].slice(0, 20)
@@ -1386,10 +1491,12 @@ export class UI {
       // Delete → remove via HA, refresh cache, pop back to list
       try {
         await this.ha.removeTodoItem(entityId, itemUid)
+        this.todoCache.delete(entityId)
         const fresh = await Promise.race([
           this.ha.getTodoItems(entityId),
           new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 5000)),
         ])
+        if (fresh.length > 0) this.todoCache.set(entityId, fresh)
         const p = fresh.filter(i => !i.done)
         const d = fresh.filter(i => i.done)
         this.todoSortedItems = [...p, ...d].slice(0, 20)
@@ -1448,9 +1555,9 @@ export class UI {
           itemWidth: UI.ACTION_BOX_W - 16,
           isItemSelectBorderEn: 1,
           itemName: [
-            `${action}`,
+            this.sanitizeListLabel(`${action}`),
             'Cancel',
-            favLabel,
+            this.sanitizeListLabel(favLabel),
           ],
         }),
       })],
@@ -1576,32 +1683,28 @@ export class UI {
     }
   }
 
-  private async entitySelect(entityId: string) {
+  private async entitySelect(entityId: string, opts: { forceConfirm?: boolean } = {}) {
     const entity = this.ha.getEntity(entityId)
-    const domain = entityId.split('.')[0]
     const subItems = buildSubItems(entityId, entity)
 
-    // Scenes and scripts run immediately — no confirm needed
-    if (domain === 'scene' || domain === 'script') {
-      const { action, serviceCall } = defaultServiceCall(entityId, entity?.state ?? 'unknown')
-      const success = await this.ha.callServiceWithData(serviceCall.domain, serviceCall.service, serviceCall.entityId, serviceCall.serviceData)
-      if (success) this.addToRecent(entityId)
-      this.push({ type: 'result', entityId, success, action })
+    // Submenus (light brightness, climate modes, etc.) always show — they are
+    // the action picker, not a confirmation. Per-pick service fires instantly.
+    if (subItems !== null) {
+      this.push({ type: 'submenu', entityId, items: subItems })
       await this.render()
-      this.resultTimer = setTimeout(() => {
-        if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
-        this.postActionNavigate().catch(console.error)
-      }, 2000)
       return
     }
 
-    if (subItems !== null) {
-      this.push({ type: 'submenu', entityId, items: subItems })
-    } else {
-      const { action, serviceCall } = defaultServiceCall(entityId, entity?.state ?? 'unknown')
+    const { action, serviceCall } = defaultServiceCall(entityId, entity?.state ?? 'unknown')
+    const override = getConfig().confirmModes?.[entityId]
+    const confirm = opts.forceConfirm || shouldConfirm(entityId, override)
+
+    if (confirm) {
       this.push({ type: 'confirm', entityId, action, serviceCall })
+      await this.render()
+      return
     }
-    await this.render()
+    await this.fireServiceWithFeedback(entityId, action, serviceCall)
   }
 
   private async openLists() {
@@ -1615,22 +1718,12 @@ export class UI {
       const entityId = enabled[0].entity_id
       const cacheWarm = this.todoEntityId === entityId && this.todoSortedItems !== null
       if (!cacheWarm) {
-        // Cache cold: fetch inline (still in event chain for first render)
         this.todoSortedItems = null
         this.todoEntityId = entityId
         this.todoSelectedIdx = 0
         this.push({ type: 'todoList', entityId })
-        await this.render()  // shows Loading... — must stay in event chain
-        try {
-          const items = await Promise.race([
-            this.ha.getTodoItems(entityId),
-            new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 8000)),
-          ])
-          const pending = items.filter(i => !i.done)
-          const done = items.filter(i => i.done)
-          this.todoSortedItems = [...pending, ...done].slice(0, 20)
-        } catch { this.todoSortedItems = [] }
-        // Note: render after await won't update glasses display — prefetch prevents this path
+        await this.render()  // show Loading...
+        void this.fetchTodoItemsBackground(entityId)
       } else {
         // Cache warm: render immediately with real data — no Loading...
         this.todoSelectedIdx = 0
@@ -1683,8 +1776,15 @@ export class UI {
     const { items } = this.screen
     if (idx >= items.length) return
     const item = items[idx]
-    this.push({ type: 'confirm', entityId: item.serviceCall.entityId, action: item.label, serviceCall: item.serviceCall })
-    await this.render()
+    const entityId = item.serviceCall.entityId
+    const override = getConfig().confirmModes?.[entityId]
+
+    if (shouldConfirm(entityId, override)) {
+      this.push({ type: 'confirm', entityId, action: item.label, serviceCall: item.serviceCall })
+      await this.render()
+      return
+    }
+    await this.fireServiceWithFeedback(entityId, item.label, item.serviceCall)
   }
 
   private async confirmSelect(idx: number) {
@@ -1700,9 +1800,7 @@ export class UI {
     if (isFav) {
       saveConfig({ favorites: config.favorites.filter(f => f.entity_id !== entityId) })
     } else {
-      if (config.favorites.length < 8) {
-        saveConfig({ favorites: [...config.favorites, { entity_id: entityId, label: this.entityName(entityId) }] })
-      }
+      saveConfig({ favorites: [...config.favorites, { entity_id: entityId, label: this.entityName(entityId) }] })
     }
     const action = isFav ? 'Removed from Favourites' : 'Added to Favourites'
     this.screenStack.pop() // remove confirm
@@ -1711,7 +1809,7 @@ export class UI {
     this.resultTimer = setTimeout(() => {
       if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
       this.postActionNavigate().catch(console.error)
-    }, 2000)
+    }, 800)
   }
 
   private async postActionNavigate() {
@@ -1730,9 +1828,21 @@ export class UI {
   private async confirmExecute() {
     if (this.screen.type !== 'confirm') return
     const { entityId, action, serviceCall } = this.screen
+    this.screenStack.pop() // remove confirm
+    await this.fireServiceWithFeedback(entityId, action, serviceCall)
+  }
 
-    // Fail fast if we know we're offline — avoids a multi-second hang on
-    // a half-open socket (e.g. WiFi→cellular handover).
+  // Show loading → call HA → swap to result → schedule postActionNavigate.
+  // Releases eventBusy so a double-tap can back out mid-call. Used by
+  // entitySelect (auto-instant), submenuSelect (when shouldConfirm=false),
+  // and confirmExecute (after Confirm).
+  private async fireServiceWithFeedback(entityId: string, action: string, serviceCall: ServiceCall): Promise<void> {
+    this.push({ type: 'loading', message: `${action}\n${this.truncate(this.entityName(entityId), 26)}` })
+    await this.render()
+    const loadingScreen = this.screen
+    this.eventBusy = false
+
+    // Fail fast if offline — avoids multi-second hang on half-open socket.
     let success: boolean
     if (!this.connected || !this.ha.isConnected()) {
       success = false
@@ -1744,14 +1854,16 @@ export class UI {
         serviceCall.serviceData
       )
     }
+
+    if (this.screen !== loadingScreen) return  // user backed out
     if (success) this.addToRecent(entityId)
-    this.screenStack.pop() // remove confirm
+    this.screenStack.pop() // remove loading
     this.push({ type: 'result', entityId, success, action })
     await this.render()
     this.resultTimer = setTimeout(() => {
       if (this.screenStack[this.screenStack.length - 1]?.type === 'result') this.screenStack.pop()
       this.postActionNavigate().catch(console.error)
-    }, 2000)
+    }, 800)
   }
 
   private stopTodoDescScroll() {
@@ -1793,7 +1905,7 @@ export class UI {
     try {
       const items = await Promise.race([
         this.ha.getTodoItems(entityId),
-        new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 8000)),
+        new Promise<import('./ha-client').TodoItem[]>(resolve => setTimeout(() => resolve([]), 12000)),
       ])
       const pending = items.filter(i => !i.done)
       const done = items.filter(i => i.done)
@@ -1815,6 +1927,8 @@ export class UI {
   private async goBack() {
     if (this.resultTimer) { clearTimeout(this.resultTimer); this.resultTimer = null }
     this.stopTodoDescScroll()
+    // Invalidate any in-flight todo fetch — user navigated away.
+    this.todoFetchReqId++
     if (this.screenStack.length > 1) this.screenStack.pop()
     await this.render()
   }
@@ -1828,7 +1942,12 @@ export class UI {
     return (entity?.attributes?.friendly_name as string) || entityId.split('.').pop() || entityId
   }
 
-  private entityLabel(entityId: string): string {
+  private entityLabel(entityId: string, opts: { withDetail?: boolean } = { withDetail: true }): string {
+    if (opts.withDetail === false) {
+      const domain = entityId.split('.')[0]
+      const state = this.ha.getEntity(entityId)?.state ?? '?'
+      return `${domainIcon(domain, state)} ${this.entityName(entityId)}`
+    }
     const entity = this.ha.getEntity(entityId)
     const state = entity?.state ?? '?'
     const domain = entityId.split('.')[0]

@@ -296,7 +296,25 @@ export class HAClient {
   }
 
   async getTodoItems(entityId: string): Promise<TodoItem[]> {
-    // Use REST API — more reliable than WebSocket call_service in WebView
+    // Fast path: HA's todo integration may expose items in state attributes
+    // (no description payload, instant from local entity cache).
+    const cached = this.entities.get(entityId)
+    const cachedItems = cached?.attributes?.['items'] as Array<Record<string, unknown>> | undefined
+    if (Array.isArray(cachedItems) && cachedItems.length > 0) {
+      return cachedItems.map(item => ({
+        uid: (item['uid'] || item['id']) as string,
+        summary: item['summary'] as string,
+        description: item['description'] as string | undefined,
+        due: item['due'] as string | undefined,
+        done: item['status'] === 'completed' || item['status'] === 'done',
+      }))
+    }
+    // REST is more reliable than WS call_service in glasses WebView, but
+    // cross-origin (e.g. phone browser hitting HA on different host) gets
+    // blocked by CORS. Skip REST in that case — go straight to WS.
+    if (typeof window !== 'undefined' && window.location.origin !== this.httpUrl) {
+      return this.getTodoItemsWS(entityId)
+    }
     try {
       console.log(`[HA] getTodoItems REST for ${entityId}`)
       const resp = await fetch(`${this.httpUrl}/api/services/todo/get_items`, {

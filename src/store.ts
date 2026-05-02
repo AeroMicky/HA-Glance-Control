@@ -51,6 +51,7 @@ export interface AppConfig {
   favorites: FavoriteConfig[]
   rooms: Record<string, string[]>
   roomOrder: string[]
+  disabledRooms: string[]
   roomListSortMode: 'custom' | 'recent'
   roomSortMode: Record<string, 'custom' | 'recent'>
   statusPanelSort: 'status' | 'name' | 'custom' | 'recent'
@@ -65,6 +66,9 @@ export interface AppConfig {
   customNames: Record<string, string>
   customIcons: Record<string, string>
   enabledTodoLists: string[]  // entity_ids of enabled todo lists
+  // Per-entity confirm override. 'always' = show confirm screen, 'never' = fire instantly.
+  // Absent = follow domain default (see domainConfirmDefault in submenus.ts).
+  confirmModes: Record<string, 'always' | 'never'>
   autoStandbySeconds: number  // 0 = disabled; otherwise seconds of inactivity before glasses return to standby
   configVersion: number        // schema version for deterministic migration
   // Legacy — kept for migration
@@ -81,6 +85,7 @@ const DEFAULT_CONFIG: AppConfig = {
   favorites: [],
   rooms: {},
   roomOrder: [],
+  disabledRooms: [],
   roomListSortMode: 'custom',
   roomSortMode: {},
   statusPanelSort: 'status' as const,
@@ -95,8 +100,9 @@ const DEFAULT_CONFIG: AppConfig = {
   customNames: {},
   customIcons: {},
   enabledTodoLists: [],
+  confirmModes: {},
   autoStandbySeconds: 60,
-  configVersion: 2,
+  configVersion: 3,
 }
 
 type ConfigListener = (config: AppConfig) => void
@@ -157,6 +163,14 @@ export async function loadConfig(): Promise<AppConfig> {
         delete config.dashboard
         config.configVersion = 2
         // Persist migrated config
+        const json = JSON.stringify(config)
+        localStorage.setItem(STORAGE_KEY, json)
+        bridgeSet(STORAGE_KEY, json)
+      }
+      if (config.configVersion < 3) {
+        // v2 -> v3: introduce confirmModes (empty by default = follow domain auto)
+        if (!config.confirmModes) config.confirmModes = {}
+        config.configVersion = 3
         const json = JSON.stringify(config)
         localStorage.setItem(STORAGE_KEY, json)
         bridgeSet(STORAGE_KEY, json)
