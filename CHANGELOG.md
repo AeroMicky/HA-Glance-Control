@@ -3,7 +3,7 @@
 ## 1.0.10 (2026-05-02)
 
 ### Fixed
-- Aviation/large todo lists: glasses display went blank with "Loading..." stuck because the list-item label cap is 64 BYTES (UTF-8), not 64 chars. Multi-byte glyphs (em-dash, ellipsis, smart quotes, bullets) silently broke the render. Labels are now sanitized to ASCII equivalents and hard-truncated by byte length across every list (favourites, rooms, todo lists, todo actions, confirm screen, submenus).
+- large todo lists: glasses display went blank with "Loading..." stuck because the list-item label cap is 64 BYTES (UTF-8), not 64 chars. Multi-byte glyphs (em-dash, ellipsis, smart quotes, bullets) silently broke the render. Labels are now sanitized to ASCII equivalents and hard-truncated by byte length across every list (favourites, rooms, todo lists, todo actions, confirm screen, submenus).
 - Todo list "Loading..." was unrecoverable on slow HA: ring lock held during the fetch, double-tap ignored, list rendered after navigation. Fetches now run in the background, double-tap exits cleanly mid-load, and stale fetch results are dropped if the user navigated away.
 - Cover Open/Close was offered for position-only blinds even when the device didn't expose those services. Cover, fan, and climate submenus now reflect the entity's actual `supported_features` and attribute ranges (`min_temp`/`max_temp`/`target_temp_step`).
 - Empty list got cached forever when the 30 s timeout fired before HA responded; the cache no longer stores timeout results.
